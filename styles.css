@@ -194,7 +194,8 @@ canvas {
 }
 
 .command-grid,
-.solver-grid {
+.solver-grid,
+.floor-controls {
   display: grid;
   gap: 8px;
 }
@@ -216,6 +217,27 @@ canvas {
 
 .solver-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.floor-controls {
+  grid-template-columns: minmax(0, 76px) minmax(0, 1fr) minmax(0, 76px);
+  align-items: center;
+}
+
+.floor-controls button {
+  background: #ecfeff;
+  color: #155e75;
+}
+
+.floor-controls strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.96rem;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .metrics {

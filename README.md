@@ -1,6 +1,6 @@
 # Maze Solver
 
-迷路を生成し、Paintbrush / 右手法 / 左手法 / BFS / DFS / A* で解く様子を可視化する静的 Web アプリです。元の `maze_game.py` は Tkinter 版として残し、GitHub Pages で公開できるようにブラウザ版を追加しています。
+迷路を生成し、Paintbrush / 右手法 / 左手法 / BFS / DFS / A* で解く様子を可視化する静的 Web アプリです。複数階層の迷路と階段移動に対応しています。元の `maze_game.py` は Tkinter 版として残し、GitHub Pages で公開できるようにブラウザ版を追加しています。
 
 ## リンク
 

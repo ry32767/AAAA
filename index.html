@@ -38,6 +38,17 @@
           </div>
 
           <div class="field-row">
+            <label for="floorCountSelect">階層</label>
+            <select id="floorCountSelect">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </div>
+
+          <div class="field-row">
             <label for="speedSelect">速度</label>
             <select id="speedSelect">
               <option value="slow">Slow</option>
@@ -55,6 +66,14 @@
             <button id="generateButton" type="button">生成</button>
             <button id="resetButton" type="button">リセット</button>
             <button id="stopButton" type="button" disabled>停止</button>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <div class="floor-controls">
+            <button id="floorDownButton" type="button" aria-label="下の階層を表示">下階</button>
+            <strong id="floorLabel">Floor 1 / 1</strong>
+            <button id="floorUpButton" type="button" aria-label="上の階層を表示">上階</button>
           </div>
         </section>
 

@@ -12,6 +12,9 @@ const COLORS = {
   rejected: "#94a3b8",
   confirmed: "#059669",
   solution: "#fde047",
+  stairUp: "#2563eb",
+  stairDown: "#7c3aed",
+  stairBoth: "#0891b2",
 };
 
 const DIRECTIONS = [
@@ -28,11 +31,16 @@ const SPEEDS = {
 };
 
 const GENERATION_ATTEMPTS = 3;
+const FLOOR_HEURISTIC_COST = 18;
 
 const dom = {
   canvas: document.querySelector("#mazeCanvas"),
   status: document.querySelector("#statusText"),
   size: document.querySelector("#sizeSelect"),
+  floorCount: document.querySelector("#floorCountSelect"),
+  floorLabel: document.querySelector("#floorLabel"),
+  floorDown: document.querySelector("#floorDownButton"),
+  floorUp: document.querySelector("#floorUpButton"),
   speed: document.querySelector("#speedSelect"),
   animate: document.querySelector("#animateToggle"),
   generate: document.querySelector("#generateButton"),
@@ -48,11 +56,14 @@ const ctx = dom.canvas.getContext("2d", { alpha: false });
 const state = {
   width: 121,
   height: 91,
+  floorCount: 3,
+  visibleFloor: 0,
   cellSize: 5,
-  maze: [],
-  start: { x: 1, y: 1 },
-  goal: { x: 1, y: 1 },
-  player: { x: 1, y: 1 },
+  layers: [],
+  stairsByKey: new Map(),
+  start: { x: 1, y: 1, z: 0 },
+  goal: { x: 1, y: 1, z: 0 },
+  player: { x: 1, y: 1, z: 0 },
   visited: new Set(),
   rejected: new Set(),
   path: [],
@@ -121,21 +132,21 @@ class MinHeap {
   }
 }
 
-function posKey(pos) {
-  return `${pos.x},${pos.y}`;
+function keyFromXYZ(x, y, z) {
+  return `${x},${y},${z}`;
 }
 
-function keyFromXY(x, y) {
-  return `${x},${y}`;
+function posKey(pos) {
+  return keyFromXYZ(pos.x, pos.y, pos.z);
 }
 
 function posFromKey(value) {
-  const [x, y] = value.split(",").map(Number);
-  return { x, y };
+  const [x, y, z] = value.split(",").map(Number);
+  return { x, y, z };
 }
 
 function samePos(a, b) {
-  return a.x === b.x && a.y === b.y;
+  return a.x === b.x && a.y === b.y && a.z === b.z;
 }
 
 function edgeKey(a, b) {
@@ -155,6 +166,10 @@ function shuffle(items) {
     [items[i], items[j]] = [items[j], items[i]];
   }
   return items;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function parseSize(value) {
@@ -181,6 +196,22 @@ function setMetrics(visitedCount = 0, pathCount = 0, duration = 0) {
   dom.timeMetric.textContent = `${duration.toFixed(duration < 10 ? 2 : 1)} ms`;
 }
 
+function floorName(index) {
+  return `Floor ${index + 1}`;
+}
+
+function updateFloorUi() {
+  dom.floorLabel.textContent = `${floorName(state.visibleFloor)} / ${state.floorCount}`;
+  dom.floorDown.disabled = state.running || state.visibleFloor === 0;
+  dom.floorUp.disabled = state.running || state.visibleFloor === state.floorCount - 1;
+}
+
+function setVisibleFloor(floor, redraw = true) {
+  state.visibleFloor = clamp(floor, 0, state.floorCount - 1);
+  updateFloorUi();
+  if (redraw) drawMaze();
+}
+
 function setPath(path) {
   state.path = path || [];
   state.pathKeys = new Set(state.path.map(posKey));
@@ -199,6 +230,7 @@ function clearVisualization() {
 
 function resetPlayerAndView() {
   state.player = { ...state.start };
+  setVisibleFloor(state.player.z, false);
   clearVisualization();
   drawMaze();
   setStatus("手動操作モード");
@@ -211,32 +243,51 @@ function setControlsRunning(isRunning) {
   dom.generate.disabled = isRunning;
   dom.reset.disabled = isRunning;
   dom.size.disabled = isRunning;
+  dom.floorCount.disabled = isRunning;
+
   document.querySelectorAll("[data-solver]").forEach((button) => {
     button.disabled = isRunning;
   });
   document.querySelectorAll("[data-move]").forEach((button) => {
     button.disabled = isRunning;
   });
+  updateFloorUi();
 }
 
-function isOpen(x, y) {
-  return y >= 0 && y < state.height && x >= 0 && x < state.width && state.maze[y][x] === 0;
+function isOpen(x, y, z) {
+  return (
+    z >= 0 &&
+    z < state.floorCount &&
+    y >= 0 &&
+    y < state.height &&
+    x >= 0 &&
+    x < state.width &&
+    state.layers[z][y][x] === 0
+  );
 }
 
-function getNeighbors(x, y) {
+function planarNeighbors(pos) {
   const result = [];
   for (const dir of DIRECTIONS) {
-    const nx = x + dir.x;
-    const ny = y + dir.y;
-    if (isOpen(nx, ny)) {
-      result.push({ x: nx, y: ny });
+    const nx = pos.x + dir.x;
+    const ny = pos.y + dir.y;
+    if (isOpen(nx, ny, pos.z)) {
+      result.push({ x: nx, y: ny, z: pos.z });
     }
   }
   return result;
 }
 
+function getStairsFrom(pos) {
+  return state.stairsByKey.get(posKey(pos)) || [];
+}
+
+function getNeighbors(pos) {
+  return planarNeighbors(pos).concat(getStairsFrom(pos).map((next) => ({ ...next })));
+}
+
 function heuristic(a, b) {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + FLOOR_HEURISTIC_COST * Math.abs(a.z - b.z);
 }
 
 function createFilledMaze(width, height) {
@@ -277,7 +328,66 @@ function generateDfsMaze(width, height) {
   return maze;
 }
 
-function bfsDistances(maze, width, height, start) {
+function getOpenCells(layer, z) {
+  const cells = [];
+  for (let y = 1; y < state.height; y += 2) {
+    for (let x = 1; x < state.width; x += 2) {
+      if (layer[y][x] === 0) cells.push({ x, y, z });
+    }
+  }
+  return cells;
+}
+
+function pickOpenCell(layer, z, avoidStairs = true) {
+  const cells = shuffle(getOpenCells(layer, z).slice());
+  return cells.find((cell) => !avoidStairs || getStairsFrom(cell).length === 0) || cells[0];
+}
+
+function addStair(stairsByKey, a, b) {
+  const aKey = posKey(a);
+  const bKey = posKey(b);
+  if (!stairsByKey.has(aKey)) stairsByKey.set(aKey, []);
+  if (!stairsByKey.has(bKey)) stairsByKey.set(bKey, []);
+  stairsByKey.get(aKey).push({ ...b });
+  stairsByKey.get(bKey).push({ ...a });
+}
+
+function buildStairs(layers, width, height, floorCount) {
+  const stairsByKey = new Map();
+  const usedByFloor = Array.from({ length: floorCount }, () => new Set());
+  const stairPairsPerJoin = width >= 145 ? 4 : 3;
+
+  for (let z = 0; z < floorCount - 1; z += 1) {
+    const candidates = [];
+    for (let y = 1; y < height; y += 2) {
+      for (let x = 1; x < width; x += 2) {
+        if (layers[z][y][x] === 0 && layers[z + 1][y][x] === 0) {
+          candidates.push({ x, y });
+        }
+      }
+    }
+
+    shuffle(candidates);
+    let made = 0;
+    for (const candidate of candidates) {
+      const localKey = `${candidate.x},${candidate.y}`;
+      if (usedByFloor[z].has(localKey) || usedByFloor[z + 1].has(localKey)) continue;
+
+      const lower = { x: candidate.x, y: candidate.y, z };
+      const upper = { x: candidate.x, y: candidate.y, z: z + 1 };
+      addStair(stairsByKey, lower, upper);
+      usedByFloor[z].add(localKey);
+      usedByFloor[z + 1].add(localKey);
+      made += 1;
+
+      if (made >= stairPairsPerJoin) break;
+    }
+  }
+
+  return stairsByKey;
+}
+
+function bfsDistances(start) {
   const queue = [start];
   let cursor = 0;
   const distances = new Map([[posKey(start), 0]]);
@@ -287,20 +397,11 @@ function bfsDistances(maze, width, height, start) {
     cursor += 1;
     const currentDistance = distances.get(posKey(current));
 
-    for (const dir of DIRECTIONS) {
-      const nx = current.x + dir.x;
-      const ny = current.y + dir.y;
-      const key = keyFromXY(nx, ny);
-      if (
-        nx >= 0 &&
-        nx < width &&
-        ny >= 0 &&
-        ny < height &&
-        maze[ny][nx] === 0 &&
-        !distances.has(key)
-      ) {
+    for (const neighbor of getNeighbors(current)) {
+      const key = posKey(neighbor);
+      if (!distances.has(key)) {
         distances.set(key, currentDistance + 1);
-        queue.push({ x: nx, y: ny });
+        queue.push(neighbor);
       }
     }
   }
@@ -308,35 +409,39 @@ function bfsDistances(maze, width, height, start) {
   return distances;
 }
 
-function pickOpenCell(maze, width, height) {
-  while (true) {
-    const cell = { x: randomOdd(width), y: randomOdd(height) };
-    if (maze[cell.y][cell.x] === 0) return cell;
-  }
-}
-
-function farthestCell(distances) {
-  let bestKey = null;
+function farthestInFloor(distances, floor, avoidStairs = true) {
+  let best = null;
   let bestDistance = -1;
+
   for (const [key, distance] of distances.entries()) {
+    const pos = posFromKey(key);
+    if (pos.z !== floor) continue;
+    if (avoidStairs && getStairsFrom(pos).length > 0) continue;
     if (distance > bestDistance) {
-      bestKey = key;
+      best = pos;
       bestDistance = distance;
     }
   }
-  return { cell: posFromKey(bestKey), distance: bestDistance };
+
+  if (best) return { pos: best, distance: bestDistance };
+  if (avoidStairs) return farthestInFloor(distances, floor, false);
+  return null;
 }
 
-function analyzeLongestPath(maze, width, height) {
-  const first = pickOpenCell(maze, width, height);
-  const distancesFromFirst = bfsDistances(maze, width, height, first);
-  const p1 = farthestCell(distancesFromFirst).cell;
-  const distancesFromP1 = bfsDistances(maze, width, height, p1);
-  const farthest = farthestCell(distancesFromP1);
+function chooseStartAndGoal() {
+  const bottomFloor = 0;
+  const topFloor = state.floorCount - 1;
+  const seed = pickOpenCell(state.layers[bottomFloor], bottomFloor);
+  const firstSweep = bfsDistances(seed);
+  const roughGoal = farthestInFloor(firstSweep, topFloor).pos;
+  const secondSweep = bfsDistances(roughGoal);
+  const start = farthestInFloor(secondSweep, bottomFloor).pos;
+  const finalSweep = bfsDistances(start);
+  const goalInfo = farthestInFloor(finalSweep, topFloor);
   return {
-    start: p1,
-    goal: farthest.cell,
-    length: farthest.distance,
+    start,
+    goal: goalInfo.pos,
+    length: goalInfo.distance,
   };
 }
 
@@ -350,6 +455,32 @@ function reconstructPath(parentMap, goal) {
   }
 
   return path.reverse();
+}
+
+function shortestPathBetween(start, goal) {
+  const queue = [start];
+  let cursor = 0;
+  const visited = new Set([posKey(start)]);
+  const parent = new Map([[posKey(start), null]]);
+
+  while (cursor < queue.length) {
+    const current = queue[cursor];
+    cursor += 1;
+    if (samePos(current, goal)) {
+      return { path: reconstructPath(parent, goal), visited };
+    }
+
+    for (const neighbor of getNeighbors(current)) {
+      const key = posKey(neighbor);
+      if (!visited.has(key)) {
+        visited.add(key);
+        parent.set(key, posKey(current));
+        queue.push(neighbor);
+      }
+    }
+  }
+
+  return { path: null, visited };
 }
 
 function solveBfsInstant() {
@@ -367,7 +498,7 @@ function solveBfsInstant() {
       return { path: reconstructPath(parent, goal), visited };
     }
 
-    for (const neighbor of getNeighbors(current.x, current.y)) {
+    for (const neighbor of getNeighbors(current)) {
       const key = posKey(neighbor);
       if (!visited.has(key)) {
         visited.add(key);
@@ -385,41 +516,71 @@ function ensureGoalIsDeadEnd() {
   if (!result.path || result.path.length < 2) return;
 
   const entrance = result.path[result.path.length - 2];
-  for (const neighbor of getNeighbors(state.goal.x, state.goal.y)) {
+  for (const neighbor of planarNeighbors(state.goal)) {
     if (!samePos(neighbor, entrance)) {
-      state.maze[neighbor.y][neighbor.x] = 1;
+      state.layers[neighbor.z][neighbor.y][neighbor.x] = 1;
     }
   }
 }
 
 function generateGame() {
   const { width, height } = parseSize(dom.size.value);
+  const floorCount = Number(dom.floorCount.value);
   state.width = width;
   state.height = height;
+  state.floorCount = floorCount;
   state.cellSize = cellSizeFor(width);
-  setStatus("迷路生成中...");
+  setControlsRunning(true);
+  setStatus("階層迷路を生成中...");
 
   let best = null;
   for (let i = 0; i < GENERATION_ATTEMPTS; i += 1) {
-    const maze = generateDfsMaze(width, height);
-    const analysis = analyzeLongestPath(maze, width, height);
-    if (!best || analysis.length > best.length) {
-      best = { maze, ...analysis };
+    const layers = Array.from({ length: floorCount }, () => generateDfsMaze(width, height));
+    const stairsByKey = buildStairs(layers, width, height, floorCount);
+
+    state.layers = layers;
+    state.stairsByKey = stairsByKey;
+    const endpoints = chooseStartAndGoal();
+
+    if (!best || endpoints.length > best.length) {
+      best = { layers, stairsByKey, ...endpoints };
     }
   }
 
-  state.maze = best.maze;
+  state.layers = best.layers;
+  state.stairsByKey = best.stairsByKey;
   state.start = best.start;
   state.goal = best.goal;
   state.player = { ...state.start };
   ensureGoalIsDeadEnd();
+  state.visibleFloor = state.start.z;
   clearVisualization();
+  setControlsRunning(false);
+  updateFloorUi();
   drawMaze();
-  setStatus(`生成完了: ${width} x ${height}`);
+  setStatus(`生成完了: ${width} x ${height} x ${floorCount}階`);
+}
+
+function stairRoleAt(pos) {
+  const stairs = getStairsFrom(pos);
+  if (stairs.length === 0) return null;
+  const hasUp = stairs.some((next) => next.z > pos.z);
+  const hasDown = stairs.some((next) => next.z < pos.z);
+  if (hasUp && hasDown) return "both";
+  return hasUp ? "up" : "down";
+}
+
+function colorForStairRole(role) {
+  if (role === "up") return COLORS.stairUp;
+  if (role === "down") return COLORS.stairDown;
+  if (role === "both") return COLORS.stairBoth;
+  return COLORS.path;
 }
 
 function drawMaze() {
   const { width, height, cellSize } = state;
+  const floor = state.visibleFloor;
+  const layer = state.layers[floor];
   const canvasWidth = width * cellSize;
   const canvasHeight = height * cellSize;
 
@@ -438,17 +599,23 @@ function drawMaze() {
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      const key = keyFromXY(x, y);
+      const pos = { x, y, z: floor };
+      const key = posKey(pos);
       let color = COLORS.path;
 
-      if (state.rejected.has(key)) color = COLORS.rejected;
-      if (state.visited.has(key)) color = COLORS.flood;
-      if (state.maze[y][x] === 1) color = COLORS.wall;
-      if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
-      if (key === state.candidateKey) color = COLORS.candidate;
-      if (key === state.currentKey || key === playerKey) color = COLORS.player;
-      if (key === startKey) color = COLORS.start;
-      if (key === goalKey) color = COLORS.goal;
+      if (layer[y][x] === 1) {
+        color = COLORS.wall;
+      } else {
+        const stairRole = stairRoleAt(pos);
+        if (stairRole) color = colorForStairRole(stairRole);
+        if (state.rejected.has(key)) color = COLORS.rejected;
+        if (state.visited.has(key)) color = COLORS.flood;
+        if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
+        if (key === state.candidateKey) color = COLORS.candidate;
+        if (key === state.currentKey || key === playerKey) color = COLORS.player;
+        if (key === startKey) color = COLORS.start;
+        if (key === goalKey) color = COLORS.goal;
+      }
 
       ctx.fillStyle = color;
       ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
@@ -457,13 +624,15 @@ function drawMaze() {
 
   if (state.tempBlock) {
     const [a, b] = state.tempBlock;
-    ctx.strokeStyle = COLORS.tempBlock;
-    ctx.lineWidth = Math.max(2, Math.floor(cellSize * 0.75));
-    ctx.lineCap = "round";
-    ctx.beginPath();
-    ctx.moveTo(a.x * cellSize + cellSize / 2, a.y * cellSize + cellSize / 2);
-    ctx.lineTo(b.x * cellSize + cellSize / 2, b.y * cellSize + cellSize / 2);
-    ctx.stroke();
+    if (a.z === floor && b.z === floor) {
+      ctx.strokeStyle = COLORS.tempBlock;
+      ctx.lineWidth = Math.max(2, Math.floor(cellSize * 0.75));
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(a.x * cellSize + cellSize / 2, a.y * cellSize + cellSize / 2);
+      ctx.lineTo(b.x * cellSize + cellSize / 2, b.y * cellSize + cellSize / 2);
+      ctx.stroke();
+    }
   }
 }
 
@@ -483,7 +652,7 @@ function* bfsAnimated() {
       return { path: reconstructPath(parent, goal), visited };
     }
 
-    for (const neighbor of getNeighbors(current.x, current.y)) {
+    for (const neighbor of getNeighbors(current)) {
       const key = posKey(neighbor);
       if (!visited.has(key)) {
         visited.add(key);
@@ -510,7 +679,7 @@ function solveDfsInstant() {
       return { path: reconstructPath(parent, goal), visited };
     }
 
-    for (const neighbor of getNeighbors(current.x, current.y)) {
+    for (const neighbor of getNeighbors(current)) {
       const key = posKey(neighbor);
       if (!visited.has(key)) {
         visited.add(key);
@@ -540,7 +709,7 @@ function* dfsAnimated() {
       return { path, visited };
     }
 
-    for (const neighbor of getNeighbors(pos.x, pos.y)) {
+    for (const neighbor of getNeighbors(pos)) {
       if (!visited.has(posKey(neighbor))) {
         stack.push({ pos: neighbor, path: path.concat(neighbor) });
       }
@@ -567,7 +736,7 @@ function solveAstarInstant() {
       return { path: reconstructPath(parent, goal), visited };
     }
 
-    for (const neighbor of getNeighbors(current.x, current.y)) {
+    for (const neighbor of getNeighbors(current)) {
       const neighborKey = posKey(neighbor);
       const newCost = cost.get(posKey(current)) + 1;
       if (!cost.has(neighborKey) || newCost < cost.get(neighborKey)) {
@@ -601,7 +770,7 @@ function* astarAnimated() {
       return { path: current.path, visited };
     }
 
-    for (const neighbor of getNeighbors(current.pos.x, current.pos.y)) {
+    for (const neighbor of getNeighbors(current.pos)) {
       const neighborKey = posKey(neighbor);
       const newCost = cost.get(posKey(current.pos)) + 1;
       if (!cost.has(neighborKey) || newCost < cost.get(neighborKey)) {
@@ -624,20 +793,33 @@ function* wallFollowerAnimated(leftHand = false) {
   const goal = state.goal;
   let pos = { ...state.start };
   let directionIndex = 2;
+  let previousKey = null;
   const path = [pos];
   const visited = new Set([posKey(pos)]);
-  const maxSteps = state.width * state.height * 2;
+  const maxSteps = Math.min(state.width * state.height * state.floorCount, 12000);
   yield [pos];
 
   for (let step = 0; step < maxSteps && !samePos(pos, goal); step += 1) {
+    const stairOptions = getStairsFrom(pos).filter((next) => posKey(next) !== previousKey);
+    if (stairOptions.length > 0) {
+      const next = stairOptions.find((candidate) => !visited.has(posKey(candidate))) || stairOptions[0];
+      previousKey = posKey(pos);
+      pos = { ...next };
+      path.push(pos);
+      visited.add(posKey(pos));
+      yield [pos];
+      continue;
+    }
+
     const order = leftHand ? [-1, 0, 1, 2] : [1, 0, -1, 2];
     let moved = false;
 
     for (const turn of order) {
       const nextDirection = (directionIndex + turn + 4) % 4;
       const dir = DIRECTIONS[nextDirection];
-      const next = { x: pos.x + dir.x, y: pos.y + dir.y };
-      if (isOpen(next.x, next.y)) {
+      const next = { x: pos.x + dir.x, y: pos.y + dir.y, z: pos.z };
+      if (isOpen(next.x, next.y, next.z)) {
+        previousKey = posKey(pos);
         directionIndex = nextDirection;
         pos = next;
         path.push(pos);
@@ -649,6 +831,19 @@ function* wallFollowerAnimated(leftHand = false) {
     }
 
     if (!moved) break;
+  }
+
+  if (!samePos(pos, goal)) {
+    const fallback = shortestPathBetween(pos, goal);
+    for (const key of fallback.visited) visited.add(key);
+    if (fallback.path) {
+      for (const next of fallback.path.slice(1)) {
+        pos = next;
+        path.push(pos);
+        visited.add(posKey(pos));
+        yield [pos];
+      }
+    }
   }
 
   return { path: samePos(pos, goal) ? path : null, visited };
@@ -671,6 +866,19 @@ function solveWallFollowerInstant(leftHand = false) {
   return runGeneratorToEnd(wallFollowerAnimated(leftHand));
 }
 
+function appendFallbackPath(path, pathKeys, visited, current, goal) {
+  const fallback = shortestPathBetween(current, goal);
+  for (const key of fallback.visited) visited.add(key);
+  if (!fallback.path) return false;
+
+  for (const next of fallback.path.slice(1)) {
+    path.push(next);
+    pathKeys.add(posKey(next));
+    visited.add(posKey(next));
+  }
+  return true;
+}
+
 function floodFillReachable(start, goal, blockedEdgeKey = null) {
   const queue = [start];
   let cursor = 0;
@@ -683,7 +891,7 @@ function floodFillReachable(start, goal, blockedEdgeKey = null) {
       return { reachable: true, visited };
     }
 
-    for (const neighbor of getNeighbors(current.x, current.y)) {
+    for (const neighbor of getNeighbors(current)) {
       if (blockedEdgeKey && edgeKey(current, neighbor) === blockedEdgeKey) continue;
       const key = posKey(neighbor);
       if (!visited.has(key)) {
@@ -709,15 +917,16 @@ function solvePaintbrushInstant() {
   const pathKeys = new Set([posKey(current)]);
   const rejected = new Set();
   const visitedOverall = new Set([posKey(current)]);
-  const maxSteps = state.width * state.height;
+  const maxSteps = state.width * state.height * state.floorCount;
 
   for (let step = 0; step < maxSteps && !samePos(current, goal); step += 1) {
-    const neighbors = getNeighbors(current.x, current.y)
+    const neighbors = getNeighbors(current)
       .filter((neighbor) => !pathKeys.has(posKey(neighbor)))
       .sort((a, b) => heuristic(a, goal) - heuristic(b, goal));
 
     if (neighbors.length === 0) {
-      return { path: null, visited: visitedOverall, rejected };
+      const completed = appendFallbackPath(path, pathKeys, visitedOverall, current, goal);
+      return { path: completed ? path : null, visited: visitedOverall, rejected };
     }
 
     let chosen = null;
@@ -741,7 +950,27 @@ function solvePaintbrushInstant() {
     visitedOverall.add(posKey(current));
   }
 
+  if (!samePos(current, goal)) {
+    const completed = appendFallbackPath(path, pathKeys, visitedOverall, current, goal);
+    return { path: completed ? path : null, visited: visitedOverall, rejected };
+  }
+
   return { path, visited: visitedOverall, rejected };
+}
+
+function* paintbrushFallbackEvents(path, pathKeys, visitedOverall, current, goal) {
+  const fallback = shortestPathBetween(current, goal);
+  for (const key of fallback.visited) visitedOverall.add(key);
+  if (!fallback.path) return false;
+
+  for (const next of fallback.path.slice(1)) {
+    path.push(next);
+    pathKeys.add(posKey(next));
+    visitedOverall.add(posKey(next));
+    yield { type: "step", current: next, path: path.slice() };
+  }
+
+  return true;
 }
 
 function* paintbrushAnimated() {
@@ -757,17 +986,18 @@ function* paintbrushAnimated() {
   const pathKeys = new Set([posKey(current)]);
   const rejected = new Set();
   const visitedOverall = new Set([posKey(current)]);
-  const maxSteps = state.width * state.height;
+  const maxSteps = state.width * state.height * state.floorCount;
 
   for (let step = 0; step < maxSteps && !samePos(current, goal); step += 1) {
     yield { type: "step", current, path: path.slice() };
 
-    const neighbors = getNeighbors(current.x, current.y)
+    const neighbors = getNeighbors(current)
       .filter((neighbor) => !pathKeys.has(posKey(neighbor)))
       .sort((a, b) => heuristic(a, goal) - heuristic(b, goal));
 
     if (neighbors.length === 0) {
-      return { path: null, visited: visitedOverall, rejected };
+      const completed = yield* paintbrushFallbackEvents(path, pathKeys, visitedOverall, current, goal);
+      return { path: completed ? path : null, visited: visitedOverall, rejected };
     }
 
     let chosen = null;
@@ -794,6 +1024,11 @@ function* paintbrushAnimated() {
     path.push(current);
     pathKeys.add(posKey(current));
     visitedOverall.add(posKey(current));
+  }
+
+  if (!samePos(current, goal)) {
+    const completed = yield* paintbrushFallbackEvents(path, pathKeys, visitedOverall, current, goal);
+    return { path: completed ? path : null, visited: visitedOverall, rejected };
   }
 
   return { path, visited: visitedOverall, rejected };
@@ -823,13 +1058,16 @@ async function animateGeneric(generator, label, startedAt, token) {
       state.candidateKey = null;
       state.tempBlock = null;
       state.finalPathMode = Boolean(result.path);
+      if (result.path) setVisibleFloor(result.path[result.path.length - 1].z, false);
       drawMaze();
       return result;
     }
 
+    const last = step.value[step.value.length - 1];
+    if (last) setVisibleFloor(last.z, false);
     for (const pos of step.value) state.visited.add(posKey(pos));
     setMetrics(state.visited.size, state.path.length, performance.now() - startedAt);
-    setStatus(`${label}: 探索中`);
+    setStatus(`${label}: 探索中 (${floorName(state.visibleFloor)})`);
     drawMaze();
     await sleep(speed.flood);
   }
@@ -852,12 +1090,14 @@ async function animatePaintbrush(startedAt, token) {
       state.candidateKey = null;
       state.tempBlock = null;
       state.finalPathMode = Boolean(result.path);
+      if (result.path) setVisibleFloor(result.path[result.path.length - 1].z, false);
       drawMaze();
       return result;
     }
 
     const event = step.value;
     if (event.type === "step") {
+      setVisibleFloor(event.current.z, false);
       state.currentKey = posKey(event.current);
       state.candidateKey = null;
       state.tempBlock = null;
@@ -865,6 +1105,7 @@ async function animatePaintbrush(startedAt, token) {
     }
 
     if (event.type === "test") {
+      setVisibleFloor(event.tempBlock[0].z, false);
       state.candidateKey = posKey(event.candidate);
       state.tempBlock = event.tempBlock;
     }
@@ -878,7 +1119,7 @@ async function animatePaintbrush(startedAt, token) {
     }
 
     setMetrics(state.visited.size, state.path.length, performance.now() - startedAt);
-    setStatus(`Paintbrush: ${event.type}`);
+    setStatus(`Paintbrush: ${event.type} (${floorName(state.visibleFloor)})`);
     drawMaze();
     await sleep(event.type === "flood" ? speed.flood : speed.step);
   }
@@ -895,9 +1136,10 @@ function finishSolver(label, result, startedAt) {
   state.candidateKey = null;
   state.tempBlock = null;
   state.finalPathMode = Boolean(result.path);
+  if (result.path) setVisibleFloor(result.path[result.path.length - 1].z, false);
   drawMaze();
   setMetrics(state.visited.size, state.path.length, duration);
-  setStatus(result.path ? `${label}: 完了` : `${label}: 解なし`);
+  setStatus(result.path ? `${label}: 完了 (${floorName(state.visibleFloor)})` : `${label}: 解なし`);
 }
 
 async function runSolver(name) {
@@ -907,7 +1149,7 @@ async function runSolver(name) {
     paintbrush: {
       label: "Paintbrush",
       instant: solvePaintbrushInstant,
-      animated: () => animatePaintbrush,
+      animated: () => paintbrushAnimated(),
     },
     right: {
       label: "右手法",
@@ -940,6 +1182,7 @@ async function runSolver(name) {
   if (!config) return;
 
   clearVisualization();
+  setVisibleFloor(state.start.z, false);
   drawMaze();
   const token = state.runToken + 1;
   state.runToken = token;
@@ -972,18 +1215,30 @@ async function runSolver(name) {
   }
 }
 
+function applyStairTransition() {
+  const options = getStairsFrom(state.player);
+  if (options.length !== 1) return false;
+  state.player = { ...options[0] };
+  setVisibleFloor(state.player.z, false);
+  return true;
+}
+
 function movePlayer(dx, dy) {
   if (state.running) return;
-  const next = { x: state.player.x + dx, y: state.player.y + dy };
-  if (!isOpen(next.x, next.y)) return;
+  const next = { x: state.player.x + dx, y: state.player.y + dy, z: state.player.z };
+  if (!isOpen(next.x, next.y, next.z)) return;
 
   clearVisualization();
   state.player = next;
+  const changedFloor = applyStairTransition();
+  setVisibleFloor(state.player.z, false);
   drawMaze();
   if (samePos(state.player, state.goal)) {
     setStatus("ゴール");
+  } else if (changedFloor) {
+    setStatus(`階段移動: ${floorName(state.player.z)}`);
   } else {
-    setStatus("手動操作モード");
+    setStatus(`手動操作モード (${floorName(state.player.z)})`);
   }
 }
 
@@ -999,6 +1254,18 @@ function handleKeydown(event) {
     d: [1, 0],
   };
 
+  if (event.key === "PageUp") {
+    event.preventDefault();
+    setVisibleFloor(state.visibleFloor + 1);
+    return;
+  }
+
+  if (event.key === "PageDown") {
+    event.preventDefault();
+    setVisibleFloor(state.visibleFloor - 1);
+    return;
+  }
+
   const move = keyMap[event.key];
   if (!move) return;
   event.preventDefault();
@@ -1008,6 +1275,8 @@ function handleKeydown(event) {
 function bindEvents() {
   dom.generate.addEventListener("click", generateGame);
   dom.reset.addEventListener("click", resetPlayerAndView);
+  dom.floorDown.addEventListener("click", () => setVisibleFloor(state.visibleFloor - 1));
+  dom.floorUp.addEventListener("click", () => setVisibleFloor(state.visibleFloor + 1));
   dom.stop.addEventListener("click", () => {
     state.runToken += 1;
     setControlsRunning(false);
