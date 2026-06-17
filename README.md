@@ -2,6 +2,11 @@
 
 迷路を生成し、Paintbrush / 右手法 / 左手法 / BFS / DFS / A* で解く様子を可視化する静的 Web アプリです。元の `maze_game.py` は Tkinter 版として残し、GitHub Pages で公開できるようにブラウザ版を追加しています。
 
+## リンク
+
+- 公開ページ: https://ry32767.github.io/AAAA/
+- GitHub リポジトリ: https://github.com/ry32767/AAAA
+
 ## 使い方
 
 `index.html` をブラウザで開くと動作します。ビルドや依存関係のインストールは不要です。
