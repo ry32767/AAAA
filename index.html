@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maze Solver</title>
+    <meta name="description" content="迷路生成と迷路解法アルゴリズムをブラウザで可視化するアプリ">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="board-panel" aria-label="迷路">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Maze Solver</p>
+            <h1>迷路生成と解法</h1>
+          </div>
+          <div class="status-strip" aria-live="polite">
+            <span id="statusText">初期化中...</span>
+          </div>
+        </header>
+
+        <div class="canvas-wrap">
+          <canvas id="mazeCanvas" tabindex="0" aria-label="生成された迷路"></canvas>
+        </div>
+      </section>
+
+      <aside class="control-panel" aria-label="操作">
+        <section class="panel-block">
+          <div class="field-row">
+            <label for="sizeSelect">サイズ</label>
+            <select id="sizeSelect">
+              <option value="81x61">81 x 61</option>
+              <option value="121x91" selected>121 x 91</option>
+              <option value="151x111">151 x 111</option>
+              <option value="201x151">201 x 151</option>
+            </select>
+          </div>
+
+          <div class="field-row">
+            <label for="speedSelect">速度</label>
+            <select id="speedSelect">
+              <option value="slow">Slow</option>
+              <option value="normal" selected>Normal</option>
+              <option value="fast">Fast</option>
+            </select>
+          </div>
+
+          <label class="switch-row">
+            <span>Animation</span>
+            <input id="animateToggle" type="checkbox" checked>
+          </label>
+
+          <div class="command-grid">
+            <button id="generateButton" type="button">生成</button>
+            <button id="resetButton" type="button">リセット</button>
+            <button id="stopButton" type="button" disabled>停止</button>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <div class="solver-grid">
+            <button type="button" data-solver="paintbrush">Paintbrush</button>
+            <button type="button" data-solver="right">右手法</button>
+            <button type="button" data-solver="left">左手法</button>
+            <button type="button" data-solver="bfs">BFS</button>
+            <button type="button" data-solver="dfs">DFS</button>
+            <button type="button" data-solver="astar">A*</button>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <div class="metrics">
+            <div>
+              <span class="metric-label">探索</span>
+              <strong id="visitedMetric">0</strong>
+            </div>
+            <div>
+              <span class="metric-label">経路</span>
+              <strong id="pathMetric">0</strong>
+            </div>
+            <div>
+              <span class="metric-label">時間</span>
+              <strong id="timeMetric">0 ms</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <div class="move-pad" aria-label="手動移動">
+            <button type="button" data-move="up" aria-label="上へ移動">↑</button>
+            <button type="button" data-move="left" aria-label="左へ移動">←</button>
+            <button type="button" data-move="down" aria-label="下へ移動">↓</button>
+            <button type="button" data-move="right" aria-label="右へ移動">→</button>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
