@@ -23,6 +23,9 @@
         <div class="canvas-wrap">
           <canvas id="mazeCanvas" tabindex="0" aria-label="生成された迷路"></canvas>
         </div>
+
+        <!-- スクリーンリーダー向け詳細アナウンス（視覚的には非表示） -->
+        <p id="announce" class="sr-only" aria-live="polite" role="status"></p>
       </section>
 
       <aside class="control-panel" aria-label="操作">
@@ -62,11 +65,48 @@
             <input id="animateToggle" type="checkbox" checked>
           </label>
 
+          <label class="switch-row">
+            <span>探索ヒートマップ</span>
+            <input id="heatmapToggle" type="checkbox">
+          </label>
+
           <div class="command-grid">
             <button id="generateButton" type="button">生成</button>
             <button id="resetButton" type="button">リセット</button>
             <button id="stopButton" type="button" disabled>停止</button>
           </div>
+        </section>
+
+        <section class="panel-block">
+          <p class="block-title">生成オプション</p>
+
+          <div class="field-row">
+            <label for="seedInput">シード</label>
+            <div class="seed-row">
+              <input id="seedInput" type="text" inputmode="numeric" placeholder="空欄=ランダム" aria-describedby="seedHelp">
+              <button id="randomSeedButton" type="button" aria-label="ランダムなシードで再生成">🎲</button>
+            </div>
+          </div>
+          <p id="seedHelp" class="field-help">同じシード・同じ設定なら同一の迷路を再現できます（研究・比較用）。</p>
+
+          <div class="field-row">
+            <label for="braidRange">ループ率 <output id="braidValue">0%</output></label>
+            <input id="braidRange" type="range" min="0" max="80" step="5" value="0"
+                   aria-describedby="braidHelp">
+          </div>
+          <p id="braidHelp" class="field-help">行き止まりを開放して別解（ループ）を作ります。0% は唯一解の完全迷路。</p>
+
+          <div class="field-row">
+            <label for="stairDensityRange">階段密度 <output id="stairDensityValue">3</output></label>
+            <input id="stairDensityRange" type="range" min="1" max="6" step="1" value="3">
+          </div>
+
+          <div class="field-row">
+            <label for="attemptsRange">生成試行 <output id="attemptsValue">3</output></label>
+            <input id="attemptsRange" type="range" min="1" max="8" step="1" value="3"
+                   aria-describedby="attemptsHelp">
+          </div>
+          <p id="attemptsHelp" class="field-help">試行回数を増やすほど、より長い（難しい）経路の迷路を選びます。</p>
         </section>
 
         <section class="panel-block">
@@ -102,6 +142,59 @@
               <span class="metric-label">時間</span>
               <strong id="timeMetric">0 ms</strong>
             </div>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <button id="compareButton" type="button" class="compare-button">全解法を比較</button>
+          <div id="compareOutput" class="compare-output" aria-live="polite"></div>
+        </section>
+
+        <section class="panel-block">
+          <p class="block-title">バッチ検証（研究用）</p>
+          <div class="field-row">
+            <label for="batchRuns">迷路数</label>
+            <input id="batchRuns" type="number" min="1" max="200" step="1" value="20">
+          </div>
+          <button id="batchButton" type="button" class="compare-button">複数迷路で統計をとる</button>
+          <p class="field-help">現在の設定でランダムな迷路を複数生成し、各解法の平均経路長・平均探索数・最短率を集計します。</p>
+          <div id="batchProgress" class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+            <div id="batchProgressBar" class="progress-bar"></div>
+          </div>
+          <div id="batchOutput" class="compare-output" aria-live="polite"></div>
+          <div class="export-row">
+            <button id="batchCsvButton" type="button" class="export-button" disabled>CSV</button>
+            <button id="batchJsonButton" type="button" class="export-button" disabled>JSON</button>
+          </div>
+        </section>
+
+        <section class="panel-block">
+          <p class="block-title">パラメータ掃引（研究用）</p>
+          <div class="field-row">
+            <label for="sweepParam">横軸</label>
+            <select id="sweepParam">
+              <option value="braid" selected>ループ率</option>
+              <option value="stairDensity">階段密度</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <label for="sweepPoints">点数</label>
+            <input id="sweepPoints" type="number" min="2" max="9" step="1" value="5">
+          </div>
+          <div class="field-row">
+            <label for="sweepRuns">点あたり迷路数</label>
+            <input id="sweepRuns" type="number" min="1" max="50" step="1" value="8">
+          </div>
+          <button id="sweepButton" type="button" class="compare-button">掃引してグラフ化</button>
+          <p class="field-help">パラメータを変えながら各解法の平均探索セル数（縦軸）を折れ線グラフで比較します。</p>
+          <div id="sweepProgress" class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden>
+            <div id="sweepProgressBar" class="progress-bar"></div>
+          </div>
+          <canvas id="sweepCanvas" class="sweep-canvas" aria-label="パラメータ掃引の折れ線グラフ"></canvas>
+          <div id="sweepLegend" class="sweep-legend"></div>
+          <div class="export-row">
+            <button id="sweepCsvButton" type="button" class="export-button" disabled>CSV</button>
+            <button id="sweepJsonButton" type="button" class="export-button" disabled>JSON</button>
           </div>
         </section>
 

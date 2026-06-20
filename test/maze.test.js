@@ -170,3 +170,214 @@ test("複数階層でも各解法が階をまたいでゴールに到達する",
     assert.ok(usesStairs, "multi-floor path must change floors");
   }
 });
+
+// --- シード（再現性） --------------------------------------------------------
+
+function countOpen(layer, width, height) {
+  let n = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (layer[y][x] === 0) n += 1;
+    }
+  }
+  return n;
+}
+
+test("同じシードからは同一の迷路が再現される", () => {
+  const make = () => {
+    maze.setSeed(123456);
+    return maze.generateDfsMaze(21, 15);
+  };
+  const a = make();
+  const b = make();
+  assert.deepEqual(a, b, "same seed must reproduce the same maze");
+
+  maze.setSeed(987654);
+  const c = maze.generateDfsMaze(21, 15);
+  assert.notDeepEqual(a, c, "different seed should (almost surely) differ");
+});
+
+// --- braiding（ループ生成） --------------------------------------------------
+
+test("braiding は通路を増やしつつ連結性を保つ", () => {
+  const width = 21;
+  const height = 15;
+
+  maze.setSeed(42);
+  const perfect = maze.generateDfsMaze(width, height);
+  const perfectOpen = countOpen(perfect, width, height);
+
+  maze.setSeed(42);
+  const braided = maze.braidMaze(maze.generateDfsMaze(width, height), width, height, 1);
+  const braidedOpen = countOpen(braided, width, height);
+
+  assert.ok(braidedOpen > perfectOpen, "braiding should open additional passages");
+
+  // 連結性は保たれる（壁を開けるだけなので分断されない）。
+  maze.state.width = width;
+  maze.state.height = height;
+  maze.state.floorCount = 1;
+  maze.state.layers = [braided];
+  maze.state.stairsByKey = new Map();
+  const distances = maze.bfsDistances({ x: 1, y: 1, z: 0 });
+  assert.equal(distances.size, braidedOpen, "braided maze must stay connected");
+});
+
+// --- 全解法比較 --------------------------------------------------------------
+
+test("solverComparison は全解法を集計し最短保証の解法を最短と判定する", () => {
+  maze.setSeed(2024);
+  setupMaze(21, 15, 1);
+  const stats = maze.solverComparison();
+
+  assert.equal(typeof stats.optimal, "number");
+  assert.equal(stats.rows.length, 6, "all six solvers should be reported");
+
+  const byName = Object.fromEntries(stats.rows.map((r) => [r.name, r]));
+  for (const name of ["bfs", "astar"]) {
+    assert.ok(byName[name].solved, `${name} should solve`);
+    assert.ok(byName[name].isShortest, `${name} should find the shortest path`);
+    assert.equal(byName[name].pathLength, stats.optimal);
+  }
+  for (const row of stats.rows) {
+    assert.ok(row.solved, `${row.name} should reach the goal`);
+  }
+});
+
+// --- バッチ検証 --------------------------------------------------------------
+
+test("batchBenchmark は複数迷路の平均統計を返す", () => {
+  // 現在設定を単一階層に固定して buildMaze を使えるようにする。
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.stairDensity = 3;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [1, 2, 3, 4, 5];
+  const stats = maze.batchBenchmark(seeds);
+
+  assert.equal(stats.runs, seeds.length);
+  assert.ok(stats.avgOptimal > 0, "average optimal length should be positive");
+  assert.equal(stats.rows.length, 6);
+
+  const byName = Object.fromEntries(stats.rows.map((r) => [r.name, r]));
+  // BFS / A* は常に最短 → 最短率 100%、平均経路長は平均最短長と一致。
+  for (const name of ["bfs", "astar"]) {
+    assert.equal(byName[name].shortestRate, 1, `${name} should always be shortest`);
+    assert.ok(Math.abs(byName[name].avgPath - stats.avgOptimal) < 1e-9);
+  }
+  for (const row of stats.rows) {
+    assert.equal(row.solveRate, 1, `${row.name} should solve every maze`);
+    assert.ok(row.avgVisited > 0);
+  }
+});
+
+test("batchBenchmark は同じシード列で再現可能", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [11, 22, 33];
+  const a = maze.batchBenchmark(seeds);
+  const b = maze.batchBenchmark(seeds);
+  assert.deepEqual(
+    a.rows.map((r) => [r.name, r.avgPath, r.shortestRate]),
+    b.rows.map((r) => [r.name, r.avgPath, r.shortestRate]),
+  );
+});
+
+test("accumulator を逐次加算した結果は batchBenchmark と一致する（チャンク化の健全性）", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [101, 202, 303, 404];
+  // avgTime は計測ごとに揺れるため、決定的な指標だけを比較する。
+  const stripTime = (s) => ({
+    runs: s.runs,
+    avgOptimal: s.avgOptimal,
+    rows: s.rows.map(({ avgTime, ...rest }) => rest),
+  });
+
+  const whole = maze.batchBenchmark(seeds);
+
+  const acc = maze.createBatchAccumulator();
+  for (const s of seeds) maze.batchAccumulateOne(acc, s);
+  const chunked = maze.finalizeBatch(acc);
+
+  assert.deepEqual(stripTime(whole), stripTime(chunked), "incremental accumulation must equal one-shot benchmark");
+});
+
+test("batchToCsv は迷路数分のメタ情報と全解法の行を出力する", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.generationAttempts = 1;
+
+  const stats = maze.batchBenchmark([1, 2, 3]);
+  const csv = maze.batchToCsv(stats);
+  const lines = csv.trim().split("\n");
+
+  assert.match(lines[0], /^# runs=3/);
+  assert.equal(lines[1], "solver,solveRate,shortestRate,avgPath,avgVisited,avgTime");
+  assert.equal(lines.length, 2 + 6, "meta + header + 6 solver rows");
+});
+
+// --- パラメータ掃引 ----------------------------------------------------------
+
+test("sweepValues は braid を等分し stairDensity を整数列にする", () => {
+  const braid = maze.sweepValues("braid", 5);
+  assert.equal(braid.length, 5);
+  assert.equal(braid[0], 0);
+  assert.equal(braid[braid.length - 1], 0.6);
+
+  const stairs = maze.sweepValues("stairDensity", 4);
+  assert.deepEqual(stairs, [1, 2, 3, 4]);
+});
+
+test("parameterSweep は各パラメータ値の集計点を返し、元の値を復元する", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.generationAttempts = 1;
+  maze.state.braid = 0.25; // 復元されるべき元の値
+
+  const values = [0, 0.3, 0.6];
+  const sweep = maze.parameterSweep("braid", values, 2);
+
+  assert.equal(sweep.param, "braid");
+  assert.equal(sweep.points.length, 3);
+  sweep.points.forEach((p, i) => {
+    assert.equal(p.value, values[i]);
+    assert.equal(p.batch.runs, 2);
+    assert.equal(p.batch.rows.length, 6);
+  });
+  assert.equal(maze.state.braid, 0.25, "sweep must restore the original parameter value");
+
+  const csv = maze.sweepToCsv(sweep);
+  assert.match(csv.split("\n")[0], /^braid,solver,/);
+  assert.equal(csv.trim().split("\n").length, 1 + 3 * 6, "header + values*solvers rows");
+});
+
+// --- 探索順（ヒートマップ） --------------------------------------------------
+
+test("solverVisitOrder は探索順を 0..total-1 で連番付けする", () => {
+  maze.setSeed(7);
+  setupMaze(21, 15, 1);
+  const visit = maze.solverVisitOrder("bfs");
+
+  assert.ok(visit.total > 1, "should record multiple cells");
+  assert.ok(visit.order.has(maze.posKey(maze.state.start)), "start must be recorded");
+
+  const indices = [...visit.order.values()].sort((x, y) => x - y);
+  assert.equal(indices[0], 0, "ordering starts at 0");
+  assert.equal(indices[indices.length - 1], visit.total - 1, "ordering ends at total-1");
+  // 連番（重複なし）であること。
+  assert.equal(new Set(indices).size, indices.length, "indices must be unique");
+});
