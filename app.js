@@ -31,27 +31,35 @@ const SPEEDS = {
 };
 
 const GENERATION_ATTEMPTS = 3;
-const FLOOR_HEURISTIC_COST = 18;
+// 階段の移動コストは 1 ステップ。階層差 1 につき最低 1 ステップ必要なので、
+// 係数を 1 にすることでヒューリスティックが実コストを超えず（許容的）、A* が最短経路を保証する。
+const FLOOR_HEURISTIC_COST = 1;
 
-const dom = {
-  canvas: document.querySelector("#mazeCanvas"),
-  status: document.querySelector("#statusText"),
-  size: document.querySelector("#sizeSelect"),
-  floorCount: document.querySelector("#floorCountSelect"),
-  floorLabel: document.querySelector("#floorLabel"),
-  floorDown: document.querySelector("#floorDownButton"),
-  floorUp: document.querySelector("#floorUpButton"),
-  speed: document.querySelector("#speedSelect"),
-  animate: document.querySelector("#animateToggle"),
-  generate: document.querySelector("#generateButton"),
-  reset: document.querySelector("#resetButton"),
-  stop: document.querySelector("#stopButton"),
-  visitedMetric: document.querySelector("#visitedMetric"),
-  pathMetric: document.querySelector("#pathMetric"),
-  timeMetric: document.querySelector("#timeMetric"),
-};
+// ブラウザでは DOM を参照して UI を構築するが、Node（テスト）からは
+// DOM 非依存のアルゴリズム関数だけを利用する。両環境で読み込めるよう分岐する。
+const IS_BROWSER = typeof document !== "undefined";
 
-const ctx = dom.canvas.getContext("2d", { alpha: false });
+const dom = IS_BROWSER
+  ? {
+      canvas: document.querySelector("#mazeCanvas"),
+      status: document.querySelector("#statusText"),
+      size: document.querySelector("#sizeSelect"),
+      floorCount: document.querySelector("#floorCountSelect"),
+      floorLabel: document.querySelector("#floorLabel"),
+      floorDown: document.querySelector("#floorDownButton"),
+      floorUp: document.querySelector("#floorUpButton"),
+      speed: document.querySelector("#speedSelect"),
+      animate: document.querySelector("#animateToggle"),
+      generate: document.querySelector("#generateButton"),
+      reset: document.querySelector("#resetButton"),
+      stop: document.querySelector("#stopButton"),
+      visitedMetric: document.querySelector("#visitedMetric"),
+      pathMetric: document.querySelector("#pathMetric"),
+      timeMetric: document.querySelector("#timeMetric"),
+    }
+  : {};
+
+const ctx = IS_BROWSER ? dom.canvas.getContext("2d", { alpha: false }) : null;
 
 const state = {
   width: 121,
@@ -484,31 +492,7 @@ function shortestPathBetween(start, goal) {
 }
 
 function solveBfsInstant() {
-  const start = state.start;
-  const goal = state.goal;
-  const queue = [start];
-  let cursor = 0;
-  const visited = new Set([posKey(start)]);
-  const parent = new Map([[posKey(start), null]]);
-
-  while (cursor < queue.length) {
-    const current = queue[cursor];
-    cursor += 1;
-    if (samePos(current, goal)) {
-      return { path: reconstructPath(parent, goal), visited };
-    }
-
-    for (const neighbor of getNeighbors(current)) {
-      const key = posKey(neighbor);
-      if (!visited.has(key)) {
-        visited.add(key);
-        parent.set(key, posKey(current));
-        queue.push(neighbor);
-      }
-    }
-  }
-
-  return { path: null, visited };
+  return shortestPathBetween(state.start, state.goal);
 }
 
 function ensureGoalIsDeadEnd() {
@@ -667,29 +651,9 @@ function* bfsAnimated() {
 }
 
 function solveDfsInstant() {
-  const start = state.start;
-  const goal = state.goal;
-  const stack = [start];
-  const visited = new Set([posKey(start)]);
-  const parent = new Map([[posKey(start), null]]);
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (samePos(current, goal)) {
-      return { path: reconstructPath(parent, goal), visited };
-    }
-
-    for (const neighbor of getNeighbors(current)) {
-      const key = posKey(neighbor);
-      if (!visited.has(key)) {
-        visited.add(key);
-        parent.set(key, posKey(current));
-        stack.push(neighbor);
-      }
-    }
-  }
-
-  return { path: null, visited };
+  // アニメーション版と同じ経路定義（スタックに経路を持たせる）になるよう、
+  // ジェネレータを最後まで回して結果を取得する。
+  return runGeneratorToEnd(dfsAnimated());
 }
 
 function* dfsAnimated() {
@@ -1300,5 +1264,34 @@ function bindEvents() {
   window.addEventListener("keydown", handleKeydown);
 }
 
-bindEvents();
-generateGame();
+if (IS_BROWSER) {
+  bindEvents();
+  generateGame();
+}
+
+// Node（テスト）向けに、DOM に依存しない迷路生成・解法ロジックを公開する。
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    state,
+    MinHeap,
+    keyFromXYZ,
+    posKey,
+    posFromKey,
+    samePos,
+    parseSize,
+    generateDfsMaze,
+    buildStairs,
+    isOpen,
+    getNeighbors,
+    heuristic,
+    bfsDistances,
+    chooseStartAndGoal,
+    shortestPathBetween,
+    solveBfsInstant,
+    solveDfsInstant,
+    solveAstarInstant,
+    solvePaintbrushInstant,
+    solveWallFollowerInstant,
+    floodFillReachable,
+  };
+}

@@ -4,31 +4,30 @@
 
 ## リンク
 
-- 公開ページ: https://ry32767.github.io/AAAA/
-- GitHub リポジトリ: https://github.com/ry32767/AAAA
+- 公開ページ: https://ry32767.github.io/MazeCreator/
+- GitHub リポジトリ: https://github.com/ry32767/MazeCreator
 
 ## 使い方
 
 `index.html` をブラウザで開くと動作します。ビルドや依存関係のインストールは不要です。
 
-## 公開
+## テスト
 
-GitHub Pages は `.github/workflows/pages.yml` からデプロイします。
+迷路生成と解法アルゴリズムの単体テストは Node.js 標準のテストランナーで実行します（追加依存なし）。
 
-```powershell
-git init
-git add .
-git commit -m "Add GitHub Pages maze solver"
-$Owner = gh api user -q ".login"
-gh repo create "$Owner/AAAA" --public --source=. --remote=origin --push
-gh api --method POST "repos/$Owner/AAAA/pages" -f build_type=workflow
+```bash
+npm test
 ```
 
-Pages の公開 URL は通常 `https://<user>.github.io/AAAA/` です。
+## 公開
+
+GitHub Pages は `.github/workflows/pages.yml` から `main` ブランチへの push 時にデプロイします。
+公開 URL は `https://ry32767.github.io/MazeCreator/` です。
 
 ## ファイル
 
 - `index.html`: GitHub Pages 用エントリ
 - `styles.css`: 画面スタイル
-- `app.js`: 迷路生成と解法アルゴリズム
+- `app.js`: 迷路生成と解法アルゴリズム（ブラウザ／Node の両方で読み込み可能）
+- `test/maze.test.js`: 迷路生成と解法の単体テスト
 - `maze_game.py`: 元の Tkinter 版

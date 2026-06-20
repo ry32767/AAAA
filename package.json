@@ -1,0 +1,10 @@
+{
+  "name": "maze-solver",
+  "version": "1.0.0",
+  "description": "迷路を生成し複数の解法アルゴリズムで解く様子を可視化する静的 Web アプリ",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}
