@@ -282,10 +282,10 @@ canvas {
 }
 
 .field-help {
-  margin: -4px 0 10px;
+  margin: 8px 0 4px;
   color: var(--muted);
   font-size: 0.74rem;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
 .field-row output {

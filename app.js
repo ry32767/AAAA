@@ -51,7 +51,7 @@ const dom = IS_BROWSER
       floorLabel: document.querySelector("#floorLabel"),
       floorDown: document.querySelector("#floorDownButton"),
       floorUp: document.querySelector("#floorUpButton"),
-      allFloors: document.querySelector("#allFloorsToggle"),
+      viewMode: document.querySelector("#viewModeSelect"),
       speed: document.querySelector("#speedSelect"),
       animate: document.querySelector("#animateToggle"),
       generate: document.querySelector("#generateButton"),
@@ -99,7 +99,7 @@ const state = {
   height: 91,
   floorCount: 3,
   visibleFloor: 0,
-  allFloors: true, // 複数階を横並びで同時表示（アニメ中の階切替によるチラつきを防ぐ）
+  viewMode: "stack", // "single"=1階ずつ / "stack"=全階平面縦並び / "iso"=全階3D俯瞰
   cellSize: 5,
   seed: 0,
   braid: 0, // ループ率 0..1（行き止まりを開放して別解を生む）
@@ -281,9 +281,16 @@ function floorName(index) {
   return `Floor ${index + 1}`;
 }
 
+// 実際に使う表示モード。1 階しかなければ常に single。
+function effectiveViewMode() {
+  if (state.floorCount <= 1) return "single";
+  return state.viewMode;
+}
+
 function updateFloorUi() {
   if (!dom.floorLabel) return;
-  const showAll = state.allFloors && state.floorCount > 1;
+  const mode = effectiveViewMode();
+  const showAll = mode !== "single";
   dom.floorLabel.textContent = showAll
     ? `全 ${state.floorCount} 階表示`
     : `${floorName(state.visibleFloor)} / ${state.floorCount}`;
@@ -733,9 +740,9 @@ function colorForStairRole(role) {
 // 表示する階のリストとレイアウト寸法を決める。
 // 全階表示は縦積み（各階は横幅いっぱい、縦スクロールで全階を確認）にして可読性を保つ。
 function floorLayout() {
-  const { width, height, cellSize, floorCount } = state;
-  const showAll = state.allFloors && floorCount > 1;
-  const floors = showAll ? Array.from({ length: floorCount }, (unused, i) => i) : [state.visibleFloor];
+  const { width, height, cellSize } = state;
+  const showAll = effectiveViewMode() === "stack";
+  const floors = showAll ? Array.from({ length: state.floorCount }, (unused, i) => i) : [state.visibleFloor];
   const labelH = showAll ? FLOOR_LABEL_H : 0;
   const blockW = width * cellSize;
   const blockH = height * cellSize;
@@ -878,8 +885,179 @@ function drawFloorBlock(floor, ox, oy, layout) {
   }
 }
 
+// 3D 俯瞰（オブリーク投影）パラメータ
+const ISO_SKEW_X = 0.5; // 奥行き(y)に応じた横ずらし量
+const ISO_SCALE_Y = 0.62; // 奥行き(y)方向の圧縮（俯瞰の傾き）
+const ISO_PAD = 14;
+
+function isoFloorLift() {
+  // 各階の縦方向の占有量 + 階間の余白。下の階ほど画面下に描く。
+  return state.height * state.cellSize * ISO_SCALE_Y + 26;
+}
+
+// 3D 俯瞰のスクリーン座標へ投影する。
+function isoProject(x, y, z, originX, originY) {
+  const cs = state.cellSize;
+  const lift = isoFloorLift();
+  const sx = originX + x * cs + y * cs * ISO_SKEW_X;
+  const sy = originY + (state.floorCount - 1 - z) * lift + y * cs * ISO_SCALE_Y;
+  return { sx, sy };
+}
+
+function drawMaze3D() {
+  const { width, height, cellSize: cs, floorCount } = state;
+  const lift = isoFloorLift();
+  const planW = width * cs;
+  const planH = height * cs;
+  const originX = ISO_PAD;
+  const originY = ISO_PAD + FLOOR_LABEL_H;
+
+  const canvasWidth = Math.ceil(ISO_PAD * 2 + planW + planH * ISO_SKEW_X);
+  const canvasHeight = Math.ceil(originY + (floorCount - 1) * lift + planH * ISO_SCALE_Y + ISO_PAD);
+
+  if (dom.canvas.width !== canvasWidth || dom.canvas.height !== canvasHeight) {
+    dom.canvas.width = canvasWidth;
+    dom.canvas.height = canvasHeight;
+    dom.canvas.style.setProperty("--canvas-width", `${canvasWidth}px`);
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+  // 階段の縦の柱（下階セルと上階の同座標をつなぐ）を先に描いて立体感を出す。
+  ctx.strokeStyle = "rgba(8, 145, 178, 0.45)";
+  ctx.lineWidth = Math.max(1.5, cs * 0.6);
+  ctx.lineCap = "round";
+  for (const keyStr of state.stairsByKey.keys()) {
+    const pos = posFromKey(keyStr);
+    if (pos.z >= floorCount - 1) continue;
+    const a = isoProject(pos.x + 0.5, pos.y + 0.5, pos.z, originX, originY);
+    const b = isoProject(pos.x + 0.5, pos.y + 0.5, pos.z + 1, originX, originY);
+    ctx.beginPath();
+    ctx.moveTo(a.sx, a.sy);
+    ctx.lineTo(b.sx, b.sy);
+    ctx.stroke();
+  }
+
+  // 下の階から順に描く（手前=下に重なる）。
+  for (let z = 0; z < floorCount; z += 1) {
+    drawFloorIso(z, originX, originY);
+  }
+}
+
+// 1 つの階を 3D 俯瞰で描く。セルは平行四辺形になるよう ctx 変換を使い、
+// マーカーと文字は変換を戻して直立で描く。
+function drawFloorIso(floor, originX, originY) {
+  const { width, height, cellSize: cs, floorCount } = state;
+  const layer = state.layers[floor];
+  const lift = isoFloorLift();
+  const floorOffsetY = (floorCount - 1 - floor) * lift;
+
+  ctx.save();
+  // local (lx, ly) -> screen: sx = originX + lx + ly*skew, sy = originY + floorOffsetY + ly*scaleY
+  ctx.setTransform(1, 0, ISO_SKEW_X, ISO_SCALE_Y, originX, originY + floorOffsetY);
+
+  // 階の床（通路全体）の下地
+  ctx.fillStyle = "#f1f5f9";
+  ctx.fillRect(0, 0, width * cs, height * cs);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const key = keyFromXYZ(x, y, floor);
+      let color = null;
+      if (layer[y][x] === 1) {
+        color = COLORS.wall;
+      } else {
+        const stairRole = stairRoleAt({ x, y, z: floor });
+        if (stairRole) color = colorForStairRole(stairRole);
+        if (state.rejected.has(key)) color = COLORS.rejected;
+        if (state.visited.has(key)) color = COLORS.flood;
+        if (state.heat && state.heat.order.has(key)) {
+          color = heatColor(state.heat.order.get(key) / state.heat.total);
+        }
+        if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
+        if (key === state.candidateKey) color = COLORS.candidate;
+        if (key === state.currentKey) color = COLORS.player;
+      }
+      if (color) {
+        ctx.fillStyle = color;
+        ctx.fillRect(x * cs, y * cs, cs, cs);
+      }
+    }
+  }
+
+  // 正解ルート（変換下でそのまま描くと立体的な線になる）
+  if (state.path.length > 1) {
+    const stroke = (color, w) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      let pen = false;
+      for (const p of state.path) {
+        if (p.z !== floor) {
+          pen = false;
+          continue;
+        }
+        if (!pen) {
+          ctx.moveTo(p.x * cs + cs / 2, p.y * cs + cs / 2);
+          pen = true;
+        } else {
+          ctx.lineTo(p.x * cs + cs / 2, p.y * cs + cs / 2);
+        }
+      }
+      ctx.stroke();
+    };
+    stroke("rgba(15, 23, 42, 0.5)", Math.max(3, cs * 1.1));
+    stroke(state.finalPathMode ? COLORS.solution : COLORS.confirmed, Math.max(2, cs * 0.7));
+  }
+
+  ctx.restore();
+
+  // ここからはスクリーン座標（直立）でマーカー・文字を描く
+  ctx.fillStyle = floor === state.start.z || floor === state.goal.z ? "#0f172a" : "#475569";
+  ctx.font = "bold 12px system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  const tags = [];
+  if (floor === state.start.z) tags.push("S");
+  if (floor === state.goal.z) tags.push("G");
+  const labelPt = isoProject(0, 0, floor, originX, originY);
+  ctx.fillText(`${floorName(floor)}${tags.length ? `  [${tags.join("/")}]` : ""}`, labelPt.sx, labelPt.sy - 4);
+
+  const stairR = Math.max(cs * 1.2, 5);
+  for (const keyStr of state.stairsByKey.keys()) {
+    const pos = posFromKey(keyStr);
+    if (pos.z !== floor) continue;
+    const role = stairRoleAt(pos);
+    const glyph = role === "up" ? "▲" : role === "down" ? "▼" : "↕";
+    const c = isoProject(pos.x + 0.5, pos.y + 0.5, floor, originX, originY);
+    drawMarker(c.sx, c.sy, stairR, colorForStairRole(role), "#ffffff", glyph);
+  }
+
+  const markerR = Math.max(cs * 1.7, 7);
+  if (state.start.z === floor) {
+    const c = isoProject(state.start.x + 0.5, state.start.y + 0.5, floor, originX, originY);
+    drawMarker(c.sx, c.sy, markerR, COLORS.start, "#064e3b", "S");
+  }
+  if (state.goal.z === floor) {
+    const c = isoProject(state.goal.x + 0.5, state.goal.y + 0.5, floor, originX, originY);
+    drawMarker(c.sx, c.sy, markerR, COLORS.goal, "#7f1d1d", "G");
+  }
+  if (state.player.z === floor && !samePos(state.player, state.start) && !samePos(state.player, state.goal)) {
+    const c = isoProject(state.player.x + 0.5, state.player.y + 0.5, floor, originX, originY);
+    drawMarker(c.sx, c.sy, markerR * 0.85, COLORS.player, "#7c2d12", null);
+  }
+}
+
 function drawMaze() {
   if (!ctx) return;
+
+  if (effectiveViewMode() === "iso") {
+    drawMaze3D();
+    return;
+  }
+
   const layout = floorLayout();
 
   if (dom.canvas.width !== layout.canvasWidth || dom.canvas.height !== layout.canvasHeight) {
@@ -2071,9 +2249,9 @@ function bindEvents() {
   dom.reset.addEventListener("click", resetPlayerAndView);
   dom.floorDown.addEventListener("click", () => setVisibleFloor(state.visibleFloor - 1));
   dom.floorUp.addEventListener("click", () => setVisibleFloor(state.visibleFloor + 1));
-  if (dom.allFloors) {
-    dom.allFloors.addEventListener("change", () => {
-      state.allFloors = dom.allFloors.checked;
+  if (dom.viewMode) {
+    dom.viewMode.addEventListener("change", () => {
+      state.viewMode = dom.viewMode.value;
       updateFloorUi();
       drawMaze();
     });
