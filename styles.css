@@ -141,7 +141,7 @@ h1 {
   box-shadow: var(--shadow);
   overflow: auto;
   display: grid;
-  place-items: center;
+  place-items: start center;
   padding: 12px;
 }
 
