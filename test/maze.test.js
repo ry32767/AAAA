@@ -290,6 +290,81 @@ test("batchBenchmark は同じシード列で再現可能", () => {
   );
 });
 
+test("accumulator を逐次加算した結果は batchBenchmark と一致する（チャンク化の健全性）", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [101, 202, 303, 404];
+  // avgTime は計測ごとに揺れるため、決定的な指標だけを比較する。
+  const stripTime = (s) => ({
+    runs: s.runs,
+    avgOptimal: s.avgOptimal,
+    rows: s.rows.map(({ avgTime, ...rest }) => rest),
+  });
+
+  const whole = maze.batchBenchmark(seeds);
+
+  const acc = maze.createBatchAccumulator();
+  for (const s of seeds) maze.batchAccumulateOne(acc, s);
+  const chunked = maze.finalizeBatch(acc);
+
+  assert.deepEqual(stripTime(whole), stripTime(chunked), "incremental accumulation must equal one-shot benchmark");
+});
+
+test("batchToCsv は迷路数分のメタ情報と全解法の行を出力する", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.generationAttempts = 1;
+
+  const stats = maze.batchBenchmark([1, 2, 3]);
+  const csv = maze.batchToCsv(stats);
+  const lines = csv.trim().split("\n");
+
+  assert.match(lines[0], /^# runs=3/);
+  assert.equal(lines[1], "solver,solveRate,shortestRate,avgPath,avgVisited,avgTime");
+  assert.equal(lines.length, 2 + 6, "meta + header + 6 solver rows");
+});
+
+// --- パラメータ掃引 ----------------------------------------------------------
+
+test("sweepValues は braid を等分し stairDensity を整数列にする", () => {
+  const braid = maze.sweepValues("braid", 5);
+  assert.equal(braid.length, 5);
+  assert.equal(braid[0], 0);
+  assert.equal(braid[braid.length - 1], 0.6);
+
+  const stairs = maze.sweepValues("stairDensity", 4);
+  assert.deepEqual(stairs, [1, 2, 3, 4]);
+});
+
+test("parameterSweep は各パラメータ値の集計点を返し、元の値を復元する", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.generationAttempts = 1;
+  maze.state.braid = 0.25; // 復元されるべき元の値
+
+  const values = [0, 0.3, 0.6];
+  const sweep = maze.parameterSweep("braid", values, 2);
+
+  assert.equal(sweep.param, "braid");
+  assert.equal(sweep.points.length, 3);
+  sweep.points.forEach((p, i) => {
+    assert.equal(p.value, values[i]);
+    assert.equal(p.batch.runs, 2);
+    assert.equal(p.batch.rows.length, 6);
+  });
+  assert.equal(maze.state.braid, 0.25, "sweep must restore the original parameter value");
+
+  const csv = maze.sweepToCsv(sweep);
+  assert.match(csv.split("\n")[0], /^braid,solver,/);
+  assert.equal(csv.trim().split("\n").length, 1 + 3 * 6, "header + values*solvers rows");
+});
+
 // --- 探索順（ヒートマップ） --------------------------------------------------
 
 test("solverVisitOrder は探索順を 0..total-1 で連番付けする", () => {

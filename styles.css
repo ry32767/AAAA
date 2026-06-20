@@ -395,6 +395,72 @@ input[type="range"] {
   vertical-align: middle;
 }
 
+.progress {
+  height: 14px;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--button-alt);
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--focus);
+  color: #ffffff;
+  font-size: 0.6rem;
+  line-height: 14px;
+  text-align: center;
+  transition: width 120ms ease;
+}
+
+.export-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.export-button {
+  background: var(--button-alt);
+  color: var(--button-alt-text);
+  font-size: 0.82rem;
+}
+
+.sweep-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.sweep-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

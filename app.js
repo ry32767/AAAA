@@ -69,6 +69,20 @@ const dom = IS_BROWSER
       batchRuns: document.querySelector("#batchRuns"),
       batch: document.querySelector("#batchButton"),
       batchOutput: document.querySelector("#batchOutput"),
+      batchProgress: document.querySelector("#batchProgress"),
+      batchProgressBar: document.querySelector("#batchProgressBar"),
+      batchCsv: document.querySelector("#batchCsvButton"),
+      batchJson: document.querySelector("#batchJsonButton"),
+      sweepParam: document.querySelector("#sweepParam"),
+      sweepPoints: document.querySelector("#sweepPoints"),
+      sweepRuns: document.querySelector("#sweepRuns"),
+      sweep: document.querySelector("#sweepButton"),
+      sweepCanvas: document.querySelector("#sweepCanvas"),
+      sweepLegend: document.querySelector("#sweepLegend"),
+      sweepProgress: document.querySelector("#sweepProgress"),
+      sweepProgressBar: document.querySelector("#sweepProgressBar"),
+      sweepCsv: document.querySelector("#sweepCsvButton"),
+      sweepJson: document.querySelector("#sweepJsonButton"),
       announce: document.querySelector("#announce"),
     }
   : {};
@@ -99,6 +113,8 @@ const state = {
   tempBlock: null,
   finalPathMode: false,
   heat: null, // { order: Map<key,index>, total } 探索順ヒートマップ用
+  lastBatch: null, // 直近のバッチ検証結果（エクスポート用）
+  lastSweep: null, // 直近のパラメータ掃引結果（エクスポート用）
   running: false,
   runToken: 0,
 };
@@ -306,6 +322,7 @@ function setControlsRunning(isRunning) {
   dom.floorCount.disabled = isRunning;
   if (dom.compare) dom.compare.disabled = isRunning;
   if (dom.batch) dom.batch.disabled = isRunning;
+  if (dom.sweep) dom.sweep.disabled = isRunning;
   if (dom.randomSeed) dom.randomSeed.disabled = isRunning;
 
   document.querySelectorAll("[data-solver]").forEach((button) => {
@@ -1293,36 +1310,40 @@ function solverComparison() {
   return { optimal, rows };
 }
 
-// 複数のシードで迷路を作り直し、全解法を実行して平均値を集計する（研究用バッチ検証）。
-// state の width/height/floorCount/braid 等の現在設定を用いる。state を書き換えるため、
-// 呼び出し側で表示用の迷路を復元すること。
-function batchBenchmark(seeds) {
+// バッチ集計用のアキュムレータ。1 迷路ずつ加算できるため、非同期チャンク処理に使える。
+function createBatchAccumulator() {
   const agg = {};
   for (const name of SOLVER_ORDER) {
     agg[name] = { label: SOLVER_CONFIGS[name].label, solved: 0, shortest: 0, pathSum: 0, visitedSum: 0, timeSum: 0 };
   }
+  return { agg, optimalSum: 0, count: 0 };
+}
 
-  let optimalSum = 0;
-  for (const seed of seeds) {
-    setSeed(seed);
-    buildMaze();
-    const stats = solverComparison();
-    optimalSum += stats.optimal;
-    for (const row of stats.rows) {
-      const a = agg[row.name];
-      a.visitedSum += row.visited;
-      a.timeSum += row.duration;
-      if (row.solved) {
-        a.solved += 1;
-        a.pathSum += row.pathLength;
-      }
-      if (row.isShortest) a.shortest += 1;
+// 指定シードで迷路を作り直し、全解法を実行してアキュムレータへ加算する。
+// state の width/height/floorCount/braid 等の現在設定を用いる（state を書き換える）。
+function batchAccumulateOne(acc, seed) {
+  setSeed(seed);
+  buildMaze();
+  const stats = solverComparison();
+  acc.optimalSum += stats.optimal;
+  acc.count += 1;
+  for (const row of stats.rows) {
+    const a = acc.agg[row.name];
+    a.visitedSum += row.visited;
+    a.timeSum += row.duration;
+    if (row.solved) {
+      a.solved += 1;
+      a.pathSum += row.pathLength;
     }
+    if (row.isShortest) a.shortest += 1;
   }
+  return acc;
+}
 
-  const n = seeds.length || 1;
+function finalizeBatch(acc) {
+  const n = acc.count || 1;
   const rows = SOLVER_ORDER.map((name) => {
-    const a = agg[name];
+    const a = acc.agg[name];
     return {
       name,
       label: a.label,
@@ -1333,7 +1354,82 @@ function batchBenchmark(seeds) {
       avgTime: a.timeSum / n,
     };
   });
-  return { runs: seeds.length, avgOptimal: optimalSum / n, rows };
+  return { runs: acc.count, avgOptimal: acc.optimalSum / n, rows };
+}
+
+// 複数のシードで迷路を作り直し、全解法を実行して平均値を集計する（研究用バッチ検証）。
+// 呼び出し側で表示用の迷路を復元すること。
+function batchBenchmark(seeds) {
+  const acc = createBatchAccumulator();
+  for (const seed of seeds) batchAccumulateOne(acc, seed);
+  return finalizeBatch(acc);
+}
+
+// パラメータ掃引: 指定パラメータ（"braid" / "stairDensity"）を values で振りながら、
+// 各値で runsPerPoint 回のバッチを集計する。横軸=パラメータ値の比較データを返す。
+function parameterSweep(param, values, runsPerPoint, seedFor) {
+  const prev = state[param];
+  const points = values.map((value, vi) => {
+    state[param] = value;
+    const acc = createBatchAccumulator();
+    for (let r = 0; r < runsPerPoint; r += 1) {
+      const seed = seedFor ? seedFor(vi, r) : randomSeed();
+      batchAccumulateOne(acc, seed);
+    }
+    return { value, batch: finalizeBatch(acc) };
+  });
+  state[param] = prev;
+  return { param, points };
+}
+
+// --- 結果のエクスポート（CSV / JSON） ----------------------------------------
+
+// エクスポートに添える生成設定（再現用メタデータ）。
+function exportSettings() {
+  return {
+    width: state.width,
+    height: state.height,
+    floorCount: state.floorCount,
+    braid: state.braid,
+    stairDensity: state.stairDensity,
+    generationAttempts: state.generationAttempts,
+  };
+}
+
+function batchToCsv(stats) {
+  const header = "solver,solveRate,shortestRate,avgPath,avgVisited,avgTime";
+  const lines = stats.rows.map((r) =>
+    [
+      r.label,
+      r.solveRate.toFixed(4),
+      r.shortestRate.toFixed(4),
+      r.avgPath == null ? "" : r.avgPath.toFixed(3),
+      r.avgVisited.toFixed(3),
+      r.avgTime.toFixed(4),
+    ].join(","),
+  );
+  return [`# runs=${stats.runs} avgOptimal=${stats.avgOptimal.toFixed(3)}`, header, ...lines].join("\n");
+}
+
+function sweepToCsv(sweep) {
+  const header = `${sweep.param},solver,solveRate,shortestRate,avgPath,avgVisited,avgTime`;
+  const lines = [];
+  for (const point of sweep.points) {
+    for (const r of point.batch.rows) {
+      lines.push(
+        [
+          point.value,
+          r.label,
+          r.solveRate.toFixed(4),
+          r.shortestRate.toFixed(4),
+          r.avgPath == null ? "" : r.avgPath.toFixed(3),
+          r.avgVisited.toFixed(3),
+          r.avgTime.toFixed(4),
+        ].join(","),
+      );
+    }
+  }
+  return [header, ...lines].join("\n");
 }
 
 // 指定解法の「探索順」を取得する。アニメーション用ジェネレータを最後まで回し、
@@ -1461,50 +1557,289 @@ function renderBatch(stats) {
     `<tbody>${rowsHtml}</tbody></table>`;
 }
 
-function runBatch() {
+// 重い処理を時間予算(budgetMs)ごとに分割実行し、合間にUIへ制御を返す（フリーズ防止）。
+// runToken が変化したら（停止/再生成）中断して false を返す。
+async function runChunked(count, step, options) {
+  const { token, onProgress, budgetMs = 24 } = options || {};
+  let last = nowMs();
+  for (let i = 0; i < count; i += 1) {
+    if (token != null && token !== state.runToken) return false;
+    step(i);
+    if (nowMs() - last >= budgetMs) {
+      if (onProgress) onProgress(i + 1, count);
+      await sleep(0);
+      last = nowMs();
+    }
+  }
+  if (onProgress) onProgress(count, count);
+  return true;
+}
+
+function setProgress(container, bar, done, total) {
+  if (!container || !bar) return;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  container.hidden = false;
+  if (container.setAttribute) container.setAttribute("aria-valuenow", String(pct));
+  bar.style.width = `${pct}%`;
+  bar.textContent = `${pct}%`;
+}
+
+function hideProgress(container) {
+  if (container) container.hidden = true;
+}
+
+function updateExportButtons() {
+  if (dom.batchCsv) dom.batchCsv.disabled = !state.lastBatch;
+  if (dom.batchJson) dom.batchJson.disabled = !state.lastBatch;
+  if (dom.sweepCsv) dom.sweepCsv.disabled = !state.lastSweep;
+  if (dom.sweepJson) dom.sweepJson.disabled = !state.lastSweep;
+}
+
+function downloadFile(filename, text, mime) {
+  if (!IS_BROWSER || typeof Blob === "undefined" || !document.createElement) return;
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// 表示用の迷路（元のシード・設定）を復元する。
+function restoreDisplayMaze(displaySeed) {
+  setSeed(displaySeed);
+  buildMaze();
+  state.visibleFloor = state.start.z;
+  clearVisualization();
+}
+
+async function runBatch() {
   if (state.running) return;
-  const runs = clamp(dom.batchRuns ? Number(dom.batchRuns.value) : 20, 1, 100);
+  const runs = clamp(dom.batchRuns ? Number(dom.batchRuns.value) : 20, 1, 200);
   const displaySeed = state.seed;
   const seeds = Array.from({ length: runs }, () => randomSeed());
+  const token = (state.runToken += 1);
 
   setControlsRunning(true);
-  setStatus(`バッチ検証: ${runs} 迷路を実行中...`);
+  setProgress(dom.batchProgress, dom.batchProgressBar, 0, runs);
+  setStatus(`バッチ検証: 0 / ${runs}`);
 
-  // 重い同期処理。先にステータスを描画させてから次のタイミングで実行する。
-  const run = () => {
-    let stats = null;
-    try {
-      stats = batchBenchmark(seeds);
-      renderBatch(stats);
-      setStatus("バッチ検証: 完了");
-    } finally {
-      // 表示用の迷路（元のシード）を復元する。
-      setSeed(displaySeed);
-      buildMaze();
-      state.visibleFloor = state.start.z;
-      clearVisualization();
-      setControlsRunning(false);
-      updateFloorUi();
-      drawMaze();
-    }
+  const acc = createBatchAccumulator();
+  const ok = await runChunked(runs, (i) => batchAccumulateOne(acc, seeds[i]), {
+    token,
+    onProgress: (done, total) => {
+      setProgress(dom.batchProgress, dom.batchProgressBar, done, total);
+      setStatus(`バッチ検証: ${done} / ${total}`);
+    },
+  });
 
-    if (stats) {
-      const mostEfficient = stats.rows
-        .filter((r) => r.shortestRate > 0)
-        .sort((a, b) => a.avgVisited - b.avgVisited)[0];
-      announce(
-        `${stats.runs} 個の迷路でバッチ検証しました。平均最短経路長は ${stats.avgOptimal.toFixed(1)} ステップ。` +
-          (mostEfficient
-            ? `最短を出した中で最も探索が少なかったのは ${mostEfficient.label}（平均 ${Math.round(mostEfficient.avgVisited)} セル）です。`
-            : ""),
-      );
-    }
-  };
+  restoreDisplayMaze(displaySeed);
 
-  if (IS_BROWSER) {
-    window.setTimeout(run, 16);
+  if (ok) {
+    const stats = finalizeBatch(acc);
+    state.lastBatch = stats;
+    renderBatch(stats);
+    updateExportButtons();
+    setStatus("バッチ検証: 完了");
+    const mostEfficient = stats.rows
+      .filter((r) => r.shortestRate > 0)
+      .sort((a, b) => a.avgVisited - b.avgVisited)[0];
+    announce(
+      `${stats.runs} 個の迷路でバッチ検証しました。平均最短経路長は ${stats.avgOptimal.toFixed(1)} ステップ。` +
+        (mostEfficient
+          ? `最短を出した中で最も探索が少なかったのは ${mostEfficient.label}（平均 ${Math.round(mostEfficient.avgVisited)} セル）です。`
+          : ""),
+    );
   } else {
-    run();
+    setStatus("バッチ検証: 停止");
+  }
+
+  hideProgress(dom.batchProgress);
+  setControlsRunning(false);
+  updateFloorUi();
+  drawMaze();
+}
+
+function paramLabel(param) {
+  return param === "stairDensity" ? "階段密度" : "ループ率";
+}
+
+// 掃引する横軸の値の配列。braid は 0〜0.6 を等分、stairDensity は 1..n の整数。
+function sweepValues(param, points) {
+  if (param === "stairDensity") {
+    const n = clamp(points, 2, 6);
+    return Array.from({ length: n }, (unused, i) => i + 1);
+  }
+  const n = clamp(points, 2, 9);
+  const max = 0.6;
+  return Array.from({ length: n }, (unused, i) => Math.round(((max * i) / (n - 1)) * 100) / 100);
+}
+
+async function runSweep() {
+  if (state.running) return;
+  const param = dom.sweepParam ? dom.sweepParam.value : "braid";
+  const points = clamp(dom.sweepPoints ? Number(dom.sweepPoints.value) : 5, 2, 9);
+  const runsPerPoint = clamp(dom.sweepRuns ? Number(dom.sweepRuns.value) : 8, 1, 50);
+  const values = sweepValues(param, points);
+  const prevParam = state[param];
+  const displaySeed = state.seed;
+  const token = (state.runToken += 1);
+
+  const accs = values.map(() => createBatchAccumulator());
+  const work = [];
+  for (let vi = 0; vi < values.length; vi += 1) {
+    for (let r = 0; r < runsPerPoint; r += 1) work.push({ vi, seed: randomSeed() });
+  }
+
+  setControlsRunning(true);
+  setProgress(dom.sweepProgress, dom.sweepProgressBar, 0, work.length);
+  setStatus(`掃引(${paramLabel(param)}): 0 / ${work.length}`);
+
+  const ok = await runChunked(
+    work.length,
+    (i) => {
+      const w = work[i];
+      state[param] = values[w.vi];
+      batchAccumulateOne(accs[w.vi], w.seed);
+    },
+    {
+      token,
+      onProgress: (done, total) => {
+        setProgress(dom.sweepProgress, dom.sweepProgressBar, done, total);
+        setStatus(`掃引(${paramLabel(param)}): ${done} / ${total}`);
+      },
+    },
+  );
+
+  state[param] = prevParam;
+  restoreDisplayMaze(displaySeed);
+
+  if (ok) {
+    const sweep = {
+      param,
+      runsPerPoint,
+      points: values.map((value, i) => ({ value, batch: finalizeBatch(accs[i]) })),
+    };
+    state.lastSweep = sweep;
+    drawSweepChart(sweep);
+    updateExportButtons();
+    setStatus("パラメータ掃引: 完了");
+    announce(
+      `${paramLabel(param)}のパラメータ掃引が完了しました。${values.length} 点 × 各 ${runsPerPoint} 回。` +
+        "グラフは横軸がパラメータ値、縦軸が平均探索セル数です。",
+    );
+  } else {
+    setStatus("パラメータ掃引: 停止");
+  }
+
+  hideProgress(dom.sweepProgress);
+  setControlsRunning(false);
+  updateFloorUi();
+  drawMaze();
+}
+
+const SWEEP_COLORS = {
+  bfs: "#2563eb",
+  astar: "#059669",
+  dfs: "#9333ea",
+  paintbrush: "#ea580c",
+  right: "#dc2626",
+  left: "#0891b2",
+};
+
+// パラメータ掃引の結果を折れ線グラフ（横軸=パラメータ値, 縦軸=平均探索セル数）で描く。
+function drawSweepChart(sweep) {
+  const canvas = dom.sweepCanvas;
+  if (!canvas || !canvas.getContext) return;
+  const W = 320;
+  const H = 220;
+  canvas.width = W;
+  canvas.height = H;
+  const g = canvas.getContext("2d");
+  if (!g) return;
+
+  g.fillStyle = "#ffffff";
+  g.fillRect(0, 0, W, H);
+
+  const padL = 46;
+  const padR = 10;
+  const padT = 12;
+  const padB = 28;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const pts = sweep.points;
+
+  let maxY = 0;
+  for (const p of pts) {
+    for (const r of p.batch.rows) maxY = Math.max(maxY, r.avgVisited);
+  }
+  maxY = maxY || 1;
+
+  const xAt = (i) => (pts.length > 1 ? padL + (plotW * i) / (pts.length - 1) : padL + plotW / 2);
+  const yAt = (v) => padT + plotH * (1 - v / maxY);
+
+  // グリッド + Y軸目盛
+  g.font = "10px system-ui, sans-serif";
+  g.textBaseline = "middle";
+  g.textAlign = "right";
+  for (let t = 0; t <= 4; t += 1) {
+    const v = (maxY * t) / 4;
+    const y = yAt(v);
+    g.strokeStyle = "#eef2f7";
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(padL, y);
+    g.lineTo(padL + plotW, y);
+    g.stroke();
+    g.fillStyle = "#64748b";
+    g.fillText(String(Math.round(v)), padL - 4, y);
+  }
+
+  // 軸
+  g.strokeStyle = "#cbd5e1";
+  g.beginPath();
+  g.moveTo(padL, padT);
+  g.lineTo(padL, padT + plotH);
+  g.lineTo(padL + plotW, padT + plotH);
+  g.stroke();
+
+  // X軸ラベル
+  g.fillStyle = "#64748b";
+  g.textAlign = "center";
+  g.textBaseline = "top";
+  pts.forEach((p, i) => {
+    const label = sweep.param === "braid" ? `${Math.round(p.value * 100)}%` : String(p.value);
+    g.fillText(label, xAt(i), padT + plotH + 5);
+  });
+
+  // 解法ごとの折れ線
+  for (const name of SOLVER_ORDER) {
+    g.strokeStyle = SWEEP_COLORS[name];
+    g.fillStyle = SWEEP_COLORS[name];
+    g.lineWidth = 2;
+    g.beginPath();
+    pts.forEach((p, i) => {
+      const row = p.batch.rows.find((r) => r.name === name);
+      const y = yAt(row.avgVisited);
+      if (i === 0) g.moveTo(xAt(i), y);
+      else g.lineTo(xAt(i), y);
+    });
+    g.stroke();
+    pts.forEach((p, i) => {
+      const row = p.batch.rows.find((r) => r.name === name);
+      g.beginPath();
+      g.arc(xAt(i), yAt(row.avgVisited), 2.5, 0, Math.PI * 2);
+      g.fill();
+    });
+  }
+
+  // 凡例（HTML）
+  if (dom.sweepLegend) {
+    dom.sweepLegend.innerHTML = SOLVER_ORDER.map(
+      (name) =>
+        `<span class="legend-item"><span class="legend-swatch" style="background:${SWEEP_COLORS[name]}"></span>${SOLVER_CONFIGS[name].label}</span>`,
+    ).join("");
   }
 }
 
@@ -1640,6 +1975,38 @@ function bindEvents() {
   if (dom.batch) {
     dom.batch.addEventListener("click", runBatch);
   }
+  if (dom.sweep) {
+    dom.sweep.addEventListener("click", runSweep);
+  }
+
+  const timestamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  if (dom.batchCsv) {
+    dom.batchCsv.addEventListener("click", () => {
+      if (state.lastBatch) downloadFile(`maze-batch-${timestamp()}.csv`, batchToCsv(state.lastBatch), "text/csv");
+    });
+  }
+  if (dom.batchJson) {
+    dom.batchJson.addEventListener("click", () => {
+      if (state.lastBatch) {
+        const payload = { type: "batch", settings: exportSettings(), ...state.lastBatch };
+        downloadFile(`maze-batch-${timestamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
+      }
+    });
+  }
+  if (dom.sweepCsv) {
+    dom.sweepCsv.addEventListener("click", () => {
+      if (state.lastSweep) downloadFile(`maze-sweep-${timestamp()}.csv`, sweepToCsv(state.lastSweep), "text/csv");
+    });
+  }
+  if (dom.sweepJson) {
+    dom.sweepJson.addEventListener("click", () => {
+      if (state.lastSweep) {
+        const payload = { type: "sweep", settings: exportSettings(), ...state.lastSweep };
+        downloadFile(`maze-sweep-${timestamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
+      }
+    });
+  }
+  updateExportButtons();
   if (dom.heatmap) {
     dom.heatmap.addEventListener("change", () => {
       if (!dom.heatmap.checked) {
@@ -1707,7 +2074,14 @@ if (typeof module !== "undefined" && module.exports) {
     buildStairs,
     buildMaze,
     solverComparison,
+    createBatchAccumulator,
+    batchAccumulateOne,
+    finalizeBatch,
     batchBenchmark,
+    parameterSweep,
+    sweepValues,
+    batchToCsv,
+    sweepToCsv,
     solverVisitOrder,
     isOpen,
     getNeighbors,
