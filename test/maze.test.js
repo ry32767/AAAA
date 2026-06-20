@@ -243,3 +243,66 @@ test("solverComparison は全解法を集計し最短保証の解法を最短と
     assert.ok(row.solved, `${row.name} should reach the goal`);
   }
 });
+
+// --- バッチ検証 --------------------------------------------------------------
+
+test("batchBenchmark は複数迷路の平均統計を返す", () => {
+  // 現在設定を単一階層に固定して buildMaze を使えるようにする。
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.stairDensity = 3;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [1, 2, 3, 4, 5];
+  const stats = maze.batchBenchmark(seeds);
+
+  assert.equal(stats.runs, seeds.length);
+  assert.ok(stats.avgOptimal > 0, "average optimal length should be positive");
+  assert.equal(stats.rows.length, 6);
+
+  const byName = Object.fromEntries(stats.rows.map((r) => [r.name, r]));
+  // BFS / A* は常に最短 → 最短率 100%、平均経路長は平均最短長と一致。
+  for (const name of ["bfs", "astar"]) {
+    assert.equal(byName[name].shortestRate, 1, `${name} should always be shortest`);
+    assert.ok(Math.abs(byName[name].avgPath - stats.avgOptimal) < 1e-9);
+  }
+  for (const row of stats.rows) {
+    assert.equal(row.solveRate, 1, `${row.name} should solve every maze`);
+    assert.ok(row.avgVisited > 0);
+  }
+});
+
+test("batchBenchmark は同じシード列で再現可能", () => {
+  maze.state.width = 21;
+  maze.state.height = 15;
+  maze.state.floorCount = 1;
+  maze.state.braid = 0;
+  maze.state.generationAttempts = 1;
+
+  const seeds = [11, 22, 33];
+  const a = maze.batchBenchmark(seeds);
+  const b = maze.batchBenchmark(seeds);
+  assert.deepEqual(
+    a.rows.map((r) => [r.name, r.avgPath, r.shortestRate]),
+    b.rows.map((r) => [r.name, r.avgPath, r.shortestRate]),
+  );
+});
+
+// --- 探索順（ヒートマップ） --------------------------------------------------
+
+test("solverVisitOrder は探索順を 0..total-1 で連番付けする", () => {
+  maze.setSeed(7);
+  setupMaze(21, 15, 1);
+  const visit = maze.solverVisitOrder("bfs");
+
+  assert.ok(visit.total > 1, "should record multiple cells");
+  assert.ok(visit.order.has(maze.posKey(maze.state.start)), "start must be recorded");
+
+  const indices = [...visit.order.values()].sort((x, y) => x - y);
+  assert.equal(indices[0], 0, "ordering starts at 0");
+  assert.equal(indices[indices.length - 1], visit.total - 1, "ordering ends at total-1");
+  // 連番（重複なし）であること。
+  assert.equal(new Set(indices).size, indices.length, "indices must be unique");
+});

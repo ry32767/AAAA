@@ -65,6 +65,11 @@
             <input id="animateToggle" type="checkbox" checked>
           </label>
 
+          <label class="switch-row">
+            <span>探索ヒートマップ</span>
+            <input id="heatmapToggle" type="checkbox">
+          </label>
+
           <div class="command-grid">
             <button id="generateButton" type="button">生成</button>
             <button id="resetButton" type="button">リセット</button>
@@ -143,6 +148,17 @@
         <section class="panel-block">
           <button id="compareButton" type="button" class="compare-button">全解法を比較</button>
           <div id="compareOutput" class="compare-output" aria-live="polite"></div>
+        </section>
+
+        <section class="panel-block">
+          <p class="block-title">バッチ検証（研究用）</p>
+          <div class="field-row">
+            <label for="batchRuns">迷路数</label>
+            <input id="batchRuns" type="number" min="1" max="100" step="1" value="20">
+          </div>
+          <button id="batchButton" type="button" class="compare-button">複数迷路で統計をとる</button>
+          <p class="field-help">現在の設定でランダムな迷路を複数生成し、各解法の平均経路長・平均探索数・最短率を集計します。</p>
+          <div id="batchOutput" class="compare-output" aria-live="polite"></div>
         </section>
 
         <section class="panel-block">

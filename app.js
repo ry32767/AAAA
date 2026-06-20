@@ -65,6 +65,10 @@ const dom = IS_BROWSER
       attemptsValue: document.querySelector("#attemptsValue"),
       compare: document.querySelector("#compareButton"),
       compareOutput: document.querySelector("#compareOutput"),
+      heatmap: document.querySelector("#heatmapToggle"),
+      batchRuns: document.querySelector("#batchRuns"),
+      batch: document.querySelector("#batchButton"),
+      batchOutput: document.querySelector("#batchOutput"),
       announce: document.querySelector("#announce"),
     }
   : {};
@@ -94,6 +98,7 @@ const state = {
   candidateKey: null,
   tempBlock: null,
   finalPathMode: false,
+  heat: null, // { order: Map<key,index>, total } 探索順ヒートマップ用
   running: false,
   runToken: 0,
 };
@@ -279,6 +284,7 @@ function clearVisualization() {
   state.candidateKey = null;
   state.tempBlock = null;
   state.finalPathMode = false;
+  state.heat = null;
   setMetrics();
 }
 
@@ -299,6 +305,7 @@ function setControlsRunning(isRunning) {
   dom.size.disabled = isRunning;
   dom.floorCount.disabled = isRunning;
   if (dom.compare) dom.compare.disabled = isRunning;
+  if (dom.batch) dom.batch.disabled = isRunning;
   if (dom.randomSeed) dom.randomSeed.disabled = isRunning;
 
   document.querySelectorAll("[data-solver]").forEach((button) => {
@@ -620,20 +627,14 @@ function readGenerationConfig() {
   if (dom.seed) dom.seed.value = String(seed);
 }
 
-function generateGame() {
-  if (IS_BROWSER) readGenerationConfig();
-
-  const { width, height } = parseSize(dom.size ? dom.size.value : `${state.width}x${state.height}`);
-  const floorCount = dom.floorCount ? Number(dom.floorCount.value) : state.floorCount;
-  state.width = width;
-  state.height = height;
-  state.floorCount = floorCount;
-  state.cellSize = cellSizeFor(width);
-  setControlsRunning(true);
-  setStatus("階層迷路を生成中...");
-
+// DOM に依存せず、現在の state 設定（width/height/floorCount/braid/
+// stairDensity/generationAttempts/seed）から迷路を構築して state に反映する。
+// 試行回数分の生成のうち最長経路のものを採用する。バッチ検証から再利用する。
+function buildMaze() {
+  const { width, height, floorCount } = state;
   let best = null;
   const attempts = Math.max(1, state.generationAttempts);
+
   for (let i = 0; i < attempts; i += 1) {
     const layers = Array.from({ length: floorCount }, () => {
       const layer = generateDfsMaze(width, height);
@@ -656,6 +657,22 @@ function generateGame() {
   state.goal = best.goal;
   state.player = { ...state.start };
   ensureGoalIsDeadEnd();
+  return best;
+}
+
+function generateGame() {
+  if (IS_BROWSER) readGenerationConfig();
+
+  const { width, height } = parseSize(dom.size ? dom.size.value : `${state.width}x${state.height}`);
+  const floorCount = dom.floorCount ? Number(dom.floorCount.value) : state.floorCount;
+  state.width = width;
+  state.height = height;
+  state.floorCount = floorCount;
+  state.cellSize = cellSizeFor(width);
+  setControlsRunning(true);
+  setStatus("階層迷路を生成中...");
+
+  const best = buildMaze();
   state.visibleFloor = state.start.z;
   clearVisualization();
   clearComparison();
@@ -719,6 +736,10 @@ function drawMaze() {
         if (stairRole) color = colorForStairRole(stairRole);
         if (state.rejected.has(key)) color = COLORS.rejected;
         if (state.visited.has(key)) color = COLORS.flood;
+        // ヒートマップ表示時は探索済みセルを「探索順」のグラデーションで塗る。
+        if (state.heat && state.heat.order.has(key)) {
+          color = heatColor(state.heat.order.get(key) / state.heat.total);
+        }
         if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
         if (key === state.candidateKey) color = COLORS.candidate;
         if (key === state.currentKey || key === playerKey) color = COLORS.player;
@@ -1272,6 +1293,91 @@ function solverComparison() {
   return { optimal, rows };
 }
 
+// 複数のシードで迷路を作り直し、全解法を実行して平均値を集計する（研究用バッチ検証）。
+// state の width/height/floorCount/braid 等の現在設定を用いる。state を書き換えるため、
+// 呼び出し側で表示用の迷路を復元すること。
+function batchBenchmark(seeds) {
+  const agg = {};
+  for (const name of SOLVER_ORDER) {
+    agg[name] = { label: SOLVER_CONFIGS[name].label, solved: 0, shortest: 0, pathSum: 0, visitedSum: 0, timeSum: 0 };
+  }
+
+  let optimalSum = 0;
+  for (const seed of seeds) {
+    setSeed(seed);
+    buildMaze();
+    const stats = solverComparison();
+    optimalSum += stats.optimal;
+    for (const row of stats.rows) {
+      const a = agg[row.name];
+      a.visitedSum += row.visited;
+      a.timeSum += row.duration;
+      if (row.solved) {
+        a.solved += 1;
+        a.pathSum += row.pathLength;
+      }
+      if (row.isShortest) a.shortest += 1;
+    }
+  }
+
+  const n = seeds.length || 1;
+  const rows = SOLVER_ORDER.map((name) => {
+    const a = agg[name];
+    return {
+      name,
+      label: a.label,
+      solveRate: a.solved / n,
+      shortestRate: a.shortest / n,
+      avgPath: a.solved ? a.pathSum / a.solved : null,
+      avgVisited: a.visitedSum / n,
+      avgTime: a.timeSum / n,
+    };
+  });
+  return { runs: seeds.length, avgOptimal: optimalSum / n, rows };
+}
+
+// 指定解法の「探索順」を取得する。アニメーション用ジェネレータを最後まで回し、
+// 各セルが最初に訪問された順番を記録する（ヒートマップ描画に使う）。
+function solverVisitOrder(name) {
+  const gen = SOLVER_CONFIGS[name].animated();
+  const order = new Map();
+  let idx = 0;
+  const add = (key) => {
+    if (!order.has(key)) {
+      order.set(key, idx);
+      idx += 1;
+    }
+  };
+
+  while (true) {
+    const step = gen.next();
+    if (step.done) {
+      const result = step.value;
+      if (result && result.visited) {
+        for (const key of result.visited) add(key);
+      }
+      return { order, total: Math.max(1, idx), result };
+    }
+
+    const value = step.value;
+    if (Array.isArray(value)) {
+      for (const pos of value) add(posKey(pos));
+    } else if (value && value.cells) {
+      for (const key of value.cells) add(key);
+    } else if (value && value.current) {
+      add(posKey(value.current));
+    } else if (value && value.candidate) {
+      add(posKey(value.candidate));
+    }
+  }
+}
+
+// 探索順 t(0..1) を寒色→暖色のグラデーションに変換する。
+function heatColor(t) {
+  const hue = 210 - clamp(t, 0, 1) * 210; // 青(210) → 赤(0)
+  return `hsl(${hue}, 85%, 60%)`;
+}
+
 function finishSolver(label, result, startedAt) {
   const duration = performance.now() - startedAt;
   state.visited = result.visited || new Set();
@@ -1340,6 +1446,68 @@ function runComparison() {
   );
 }
 
+function renderBatch(stats) {
+  if (!dom.batchOutput) return;
+  const rowsHtml = stats.rows
+    .map((r) => {
+      const path = r.avgPath == null ? "—" : r.avgPath.toFixed(1);
+      return `<tr><th scope="row">${r.label}</th><td>${path}</td><td>${Math.round(r.avgVisited).toLocaleString("ja-JP")}</td><td>${Math.round(r.shortestRate * 100)}%</td><td>${r.avgTime.toFixed(2)}</td></tr>`;
+    })
+    .join("");
+
+  dom.batchOutput.innerHTML =
+    `<table class="cmp-table"><caption>${stats.runs} 迷路の平均 / 平均最短長 ${stats.avgOptimal.toFixed(1)}</caption>` +
+    "<thead><tr><th scope=\"col\">解法</th><th scope=\"col\">平均経路</th><th scope=\"col\">平均探索</th><th scope=\"col\">最短率</th><th scope=\"col\">平均ms</th></tr></thead>" +
+    `<tbody>${rowsHtml}</tbody></table>`;
+}
+
+function runBatch() {
+  if (state.running) return;
+  const runs = clamp(dom.batchRuns ? Number(dom.batchRuns.value) : 20, 1, 100);
+  const displaySeed = state.seed;
+  const seeds = Array.from({ length: runs }, () => randomSeed());
+
+  setControlsRunning(true);
+  setStatus(`バッチ検証: ${runs} 迷路を実行中...`);
+
+  // 重い同期処理。先にステータスを描画させてから次のタイミングで実行する。
+  const run = () => {
+    let stats = null;
+    try {
+      stats = batchBenchmark(seeds);
+      renderBatch(stats);
+      setStatus("バッチ検証: 完了");
+    } finally {
+      // 表示用の迷路（元のシード）を復元する。
+      setSeed(displaySeed);
+      buildMaze();
+      state.visibleFloor = state.start.z;
+      clearVisualization();
+      setControlsRunning(false);
+      updateFloorUi();
+      drawMaze();
+    }
+
+    if (stats) {
+      const mostEfficient = stats.rows
+        .filter((r) => r.shortestRate > 0)
+        .sort((a, b) => a.avgVisited - b.avgVisited)[0];
+      announce(
+        `${stats.runs} 個の迷路でバッチ検証しました。平均最短経路長は ${stats.avgOptimal.toFixed(1)} ステップ。` +
+          (mostEfficient
+            ? `最短を出した中で最も探索が少なかったのは ${mostEfficient.label}（平均 ${Math.round(mostEfficient.avgVisited)} セル）です。`
+            : ""),
+      );
+    }
+  };
+
+  if (IS_BROWSER) {
+    window.setTimeout(run, 16);
+  } else {
+    run();
+  }
+}
+
 async function runSolver(name) {
   if (state.running) return;
 
@@ -1369,6 +1537,12 @@ async function runSolver(name) {
 
     if (result && token === state.runToken) {
       finishSolver(config.label, result, startedAt);
+      // ヒートマップ表示が有効なら、探索順のグラデーションで塗り直す。
+      if (dom.heatmap && dom.heatmap.checked && result.path) {
+        const visit = solverVisitOrder(name);
+        state.heat = { order: visit.order, total: visit.total };
+        drawMaze();
+      }
     } else if (token === state.runToken) {
       setStatus(`${config.label}: 停止`);
     }
@@ -1463,6 +1637,17 @@ function bindEvents() {
   if (dom.compare) {
     dom.compare.addEventListener("click", runComparison);
   }
+  if (dom.batch) {
+    dom.batch.addEventListener("click", runBatch);
+  }
+  if (dom.heatmap) {
+    dom.heatmap.addEventListener("change", () => {
+      if (!dom.heatmap.checked) {
+        state.heat = null;
+        drawMaze();
+      }
+    });
+  }
 
   syncRangeLabel(dom.braid, dom.braidValue, (v) => `${v}%`);
   syncRangeLabel(dom.stairDensity, dom.stairDensityValue, (v) => v);
@@ -1520,7 +1705,10 @@ if (typeof module !== "undefined" && module.exports) {
     generateDfsMaze,
     braidMaze,
     buildStairs,
+    buildMaze,
     solverComparison,
+    batchBenchmark,
+    solverVisitOrder,
     isOpen,
     getNeighbors,
     heuristic,

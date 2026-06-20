@@ -321,6 +321,16 @@ input[type="range"] {
   min-height: 28px;
 }
 
+.field-row input[type="number"] {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
 .compare-button {
   width: 100%;
   background: #eef2ff;
