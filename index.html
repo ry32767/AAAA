@@ -23,6 +23,9 @@
         <div class="canvas-wrap">
           <canvas id="mazeCanvas" tabindex="0" aria-label="生成された迷路"></canvas>
         </div>
+
+        <!-- スクリーンリーダー向け詳細アナウンス（視覚的には非表示） -->
+        <p id="announce" class="sr-only" aria-live="polite" role="status"></p>
       </section>
 
       <aside class="control-panel" aria-label="操作">
@@ -70,6 +73,38 @@
         </section>
 
         <section class="panel-block">
+          <p class="block-title">生成オプション</p>
+
+          <div class="field-row">
+            <label for="seedInput">シード</label>
+            <div class="seed-row">
+              <input id="seedInput" type="text" inputmode="numeric" placeholder="空欄=ランダム" aria-describedby="seedHelp">
+              <button id="randomSeedButton" type="button" aria-label="ランダムなシードで再生成">🎲</button>
+            </div>
+          </div>
+          <p id="seedHelp" class="field-help">同じシード・同じ設定なら同一の迷路を再現できます（研究・比較用）。</p>
+
+          <div class="field-row">
+            <label for="braidRange">ループ率 <output id="braidValue">0%</output></label>
+            <input id="braidRange" type="range" min="0" max="80" step="5" value="0"
+                   aria-describedby="braidHelp">
+          </div>
+          <p id="braidHelp" class="field-help">行き止まりを開放して別解（ループ）を作ります。0% は唯一解の完全迷路。</p>
+
+          <div class="field-row">
+            <label for="stairDensityRange">階段密度 <output id="stairDensityValue">3</output></label>
+            <input id="stairDensityRange" type="range" min="1" max="6" step="1" value="3">
+          </div>
+
+          <div class="field-row">
+            <label for="attemptsRange">生成試行 <output id="attemptsValue">3</output></label>
+            <input id="attemptsRange" type="range" min="1" max="8" step="1" value="3"
+                   aria-describedby="attemptsHelp">
+          </div>
+          <p id="attemptsHelp" class="field-help">試行回数を増やすほど、より長い（難しい）経路の迷路を選びます。</p>
+        </section>
+
+        <section class="panel-block">
           <div class="floor-controls">
             <button id="floorDownButton" type="button" aria-label="下の階層を表示">下階</button>
             <strong id="floorLabel">Floor 1 / 1</strong>
@@ -103,6 +138,11 @@
               <strong id="timeMetric">0 ms</strong>
             </div>
           </div>
+        </section>
+
+        <section class="panel-block">
+          <button id="compareButton" type="button" class="compare-button">全解法を比較</button>
+          <div id="compareOutput" class="compare-output" aria-live="polite"></div>
         </section>
 
         <section class="panel-block">

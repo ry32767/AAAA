@@ -170,3 +170,76 @@ test("複数階層でも各解法が階をまたいでゴールに到達する",
     assert.ok(usesStairs, "multi-floor path must change floors");
   }
 });
+
+// --- シード（再現性） --------------------------------------------------------
+
+function countOpen(layer, width, height) {
+  let n = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (layer[y][x] === 0) n += 1;
+    }
+  }
+  return n;
+}
+
+test("同じシードからは同一の迷路が再現される", () => {
+  const make = () => {
+    maze.setSeed(123456);
+    return maze.generateDfsMaze(21, 15);
+  };
+  const a = make();
+  const b = make();
+  assert.deepEqual(a, b, "same seed must reproduce the same maze");
+
+  maze.setSeed(987654);
+  const c = maze.generateDfsMaze(21, 15);
+  assert.notDeepEqual(a, c, "different seed should (almost surely) differ");
+});
+
+// --- braiding（ループ生成） --------------------------------------------------
+
+test("braiding は通路を増やしつつ連結性を保つ", () => {
+  const width = 21;
+  const height = 15;
+
+  maze.setSeed(42);
+  const perfect = maze.generateDfsMaze(width, height);
+  const perfectOpen = countOpen(perfect, width, height);
+
+  maze.setSeed(42);
+  const braided = maze.braidMaze(maze.generateDfsMaze(width, height), width, height, 1);
+  const braidedOpen = countOpen(braided, width, height);
+
+  assert.ok(braidedOpen > perfectOpen, "braiding should open additional passages");
+
+  // 連結性は保たれる（壁を開けるだけなので分断されない）。
+  maze.state.width = width;
+  maze.state.height = height;
+  maze.state.floorCount = 1;
+  maze.state.layers = [braided];
+  maze.state.stairsByKey = new Map();
+  const distances = maze.bfsDistances({ x: 1, y: 1, z: 0 });
+  assert.equal(distances.size, braidedOpen, "braided maze must stay connected");
+});
+
+// --- 全解法比較 --------------------------------------------------------------
+
+test("solverComparison は全解法を集計し最短保証の解法を最短と判定する", () => {
+  maze.setSeed(2024);
+  setupMaze(21, 15, 1);
+  const stats = maze.solverComparison();
+
+  assert.equal(typeof stats.optimal, "number");
+  assert.equal(stats.rows.length, 6, "all six solvers should be reported");
+
+  const byName = Object.fromEntries(stats.rows.map((r) => [r.name, r]));
+  for (const name of ["bfs", "astar"]) {
+    assert.ok(byName[name].solved, `${name} should solve`);
+    assert.ok(byName[name].isShortest, `${name} should find the shortest path`);
+    assert.equal(byName[name].pathLength, stats.optimal);
+  }
+  for (const row of stats.rows) {
+    assert.ok(row.solved, `${row.name} should reach the goal`);
+  }
+});

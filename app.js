@@ -30,7 +30,6 @@ const SPEEDS = {
   fast: { flood: 0, step: 12 },
 };
 
-const GENERATION_ATTEMPTS = 3;
 // 階段の移動コストは 1 ステップ。階層差 1 につき最低 1 ステップ必要なので、
 // 係数を 1 にすることでヒューリスティックが実コストを超えず（許容的）、A* が最短経路を保証する。
 const FLOOR_HEURISTIC_COST = 1;
@@ -56,6 +55,17 @@ const dom = IS_BROWSER
       visitedMetric: document.querySelector("#visitedMetric"),
       pathMetric: document.querySelector("#pathMetric"),
       timeMetric: document.querySelector("#timeMetric"),
+      seed: document.querySelector("#seedInput"),
+      randomSeed: document.querySelector("#randomSeedButton"),
+      braid: document.querySelector("#braidRange"),
+      braidValue: document.querySelector("#braidValue"),
+      stairDensity: document.querySelector("#stairDensityRange"),
+      stairDensityValue: document.querySelector("#stairDensityValue"),
+      attempts: document.querySelector("#attemptsRange"),
+      attemptsValue: document.querySelector("#attemptsValue"),
+      compare: document.querySelector("#compareButton"),
+      compareOutput: document.querySelector("#compareOutput"),
+      announce: document.querySelector("#announce"),
     }
   : {};
 
@@ -67,6 +77,10 @@ const state = {
   floorCount: 3,
   visibleFloor: 0,
   cellSize: 5,
+  seed: 0,
+  braid: 0, // ループ率 0..1（行き止まりを開放して別解を生む）
+  stairDensity: 3, // 階のつなぎ目あたりの階段ペア数
+  generationAttempts: 3, // 最長経路を選ぶための生成試行回数
   layers: [],
   stairsByKey: new Map(),
   start: { x: 1, y: 1, z: 0 },
@@ -163,14 +177,40 @@ function edgeKey(a, b) {
   return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
 }
 
+// 再現可能な擬似乱数（mulberry32）。シードを与えると同じ迷路を再生成でき、
+// 同一迷路上での解法アルゴリズム比較（研究用途）が可能になる。
+function makeRng(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// 既定はブラウザ標準の乱数。generateGame() でシードが指定されると差し替わる。
+let rng = Math.random;
+
+function setSeed(seed) {
+  state.seed = seed >>> 0;
+  rng = makeRng(state.seed);
+  return state.seed;
+}
+
+function randomSeed() {
+  return Math.floor(Math.random() * 0xffffffff) >>> 0;
+}
+
 function randomOdd(limit) {
   const count = Math.floor((limit - 1) / 2);
-  return 1 + Math.floor(Math.random() * count) * 2;
+  return 1 + Math.floor(rng() * count) * 2;
 }
 
 function shuffle(items) {
   for (let i = items.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [items[i], items[j]] = [items[j], items[i]];
   }
   return items;
@@ -195,10 +235,16 @@ function cellSizeFor(width) {
 }
 
 function setStatus(text) {
-  dom.status.textContent = text;
+  if (dom.status) dom.status.textContent = text;
+}
+
+// スクリーンリーダー向けの詳細アナウンス（aria-live 領域へ全文を流し込む）。
+function announce(text) {
+  if (dom.announce) dom.announce.textContent = text;
 }
 
 function setMetrics(visitedCount = 0, pathCount = 0, duration = 0) {
+  if (!dom.visitedMetric) return;
   dom.visitedMetric.textContent = visitedCount.toLocaleString("ja-JP");
   dom.pathMetric.textContent = pathCount.toLocaleString("ja-JP");
   dom.timeMetric.textContent = `${duration.toFixed(duration < 10 ? 2 : 1)} ms`;
@@ -252,6 +298,8 @@ function setControlsRunning(isRunning) {
   dom.reset.disabled = isRunning;
   dom.size.disabled = isRunning;
   dom.floorCount.disabled = isRunning;
+  if (dom.compare) dom.compare.disabled = isRunning;
+  if (dom.randomSeed) dom.randomSeed.disabled = isRunning;
 
   document.querySelectorAll("[data-solver]").forEach((button) => {
     button.disabled = isRunning;
@@ -336,6 +384,58 @@ function generateDfsMaze(width, height) {
   return maze;
 }
 
+// 完全迷路（木）の行き止まりを一定割合で開放し、ループ（別解）を作る。
+// factor は 0..1。0 なら唯一解、値を上げるほど別解が増え、壁伝い法が解けず
+// BFS/A* との差が際立つため、アルゴリズム比較の題材として面白くなる。
+function braidMaze(maze, width, height, factor) {
+  if (factor <= 0) return maze;
+
+  const step = [
+    { x: 0, y: -2 },
+    { x: 2, y: 0 },
+    { x: 0, y: 2 },
+    { x: -2, y: 0 },
+  ];
+
+  const deadEnds = [];
+  for (let y = 1; y < height; y += 2) {
+    for (let x = 1; x < width; x += 2) {
+      if (maze[y][x] !== 0) continue;
+      let openLinks = 0;
+      for (const d of step) {
+        const wx = x + d.x / 2;
+        const wy = y + d.y / 2;
+        if (wx >= 0 && wx < width && wy >= 0 && wy < height && maze[wy][wx] === 0) {
+          openLinks += 1;
+        }
+      }
+      if (openLinks === 1) deadEnds.push({ x, y });
+    }
+  }
+
+  shuffle(deadEnds);
+  for (const cell of deadEnds) {
+    if (rng() >= factor) continue;
+    // まだ壁で隔てられている隣接セルへの通路を 1 つ開ける。
+    const closed = [];
+    for (const d of step) {
+      const nx = cell.x + d.x;
+      const ny = cell.y + d.y;
+      const wx = cell.x + d.x / 2;
+      const wy = cell.y + d.y / 2;
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height && maze[ny][nx] === 0 && maze[wy][wx] === 1) {
+        closed.push({ wx, wy });
+      }
+    }
+    if (closed.length > 0) {
+      const pick = closed[Math.floor(rng() * closed.length)];
+      maze[pick.wy][pick.wx] = 0;
+    }
+  }
+
+  return maze;
+}
+
 function getOpenCells(layer, z) {
   const cells = [];
   for (let y = 1; y < state.height; y += 2) {
@@ -363,7 +463,7 @@ function addStair(stairsByKey, a, b) {
 function buildStairs(layers, width, height, floorCount) {
   const stairsByKey = new Map();
   const usedByFloor = Array.from({ length: floorCount }, () => new Set());
-  const stairPairsPerJoin = width >= 145 ? 4 : 3;
+  const stairPairsPerJoin = state.stairDensity;
 
   for (let z = 0; z < floorCount - 1; z += 1) {
     const candidates = [];
@@ -507,9 +607,24 @@ function ensureGoalIsDeadEnd() {
   }
 }
 
+// DOM の生成オプションを state に取り込む。空欄シードはランダムに割り当て、
+// 使用したシードを入力欄へ反映して再現できるようにする。
+function readGenerationConfig() {
+  if (dom.braid) state.braid = clamp(Number(dom.braid.value) / 100, 0, 1);
+  if (dom.stairDensity) state.stairDensity = clamp(Number(dom.stairDensity.value), 1, 8);
+  if (dom.attempts) state.generationAttempts = clamp(Number(dom.attempts.value), 1, 10);
+
+  const raw = dom.seed ? dom.seed.value.trim() : "";
+  const seed = raw === "" || Number.isNaN(Number(raw)) ? randomSeed() : Number(raw) >>> 0;
+  setSeed(seed);
+  if (dom.seed) dom.seed.value = String(seed);
+}
+
 function generateGame() {
-  const { width, height } = parseSize(dom.size.value);
-  const floorCount = Number(dom.floorCount.value);
+  if (IS_BROWSER) readGenerationConfig();
+
+  const { width, height } = parseSize(dom.size ? dom.size.value : `${state.width}x${state.height}`);
+  const floorCount = dom.floorCount ? Number(dom.floorCount.value) : state.floorCount;
   state.width = width;
   state.height = height;
   state.floorCount = floorCount;
@@ -518,8 +633,12 @@ function generateGame() {
   setStatus("階層迷路を生成中...");
 
   let best = null;
-  for (let i = 0; i < GENERATION_ATTEMPTS; i += 1) {
-    const layers = Array.from({ length: floorCount }, () => generateDfsMaze(width, height));
+  const attempts = Math.max(1, state.generationAttempts);
+  for (let i = 0; i < attempts; i += 1) {
+    const layers = Array.from({ length: floorCount }, () => {
+      const layer = generateDfsMaze(width, height);
+      return braidMaze(layer, width, height, state.braid);
+    });
     const stairsByKey = buildStairs(layers, width, height, floorCount);
 
     state.layers = layers;
@@ -539,10 +658,16 @@ function generateGame() {
   ensureGoalIsDeadEnd();
   state.visibleFloor = state.start.z;
   clearVisualization();
+  clearComparison();
   setControlsRunning(false);
   updateFloorUi();
   drawMaze();
   setStatus(`生成完了: ${width} x ${height} x ${floorCount}階`);
+  announce(
+    `迷路を生成しました。サイズ ${width}×${height}、${floorCount}階、` +
+      `シード ${state.seed}、ループ率 ${Math.round(state.braid * 100)}%。` +
+      `最短経路長 ${best.length} ステップ。スタートは ${floorName(state.start.z)}、ゴールは ${floorName(state.goal.z)} です。`,
+  );
 }
 
 function stairRoleAt(pos) {
@@ -1091,6 +1216,62 @@ async function animatePaintbrush(startedAt, token) {
   return null;
 }
 
+// 各解法の表示名・即時実行関数・アニメーション・最短保証フラグ。
+// runSolver と比較機能（solverComparison）で共有する。
+const SOLVER_CONFIGS = {
+  paintbrush: {
+    label: "Paintbrush",
+    instant: solvePaintbrushInstant,
+    animated: () => paintbrushAnimated(),
+    optimal: false,
+  },
+  right: {
+    label: "右手法",
+    instant: () => solveWallFollowerInstant(false),
+    animated: () => wallFollowerAnimated(false),
+    optimal: false,
+  },
+  left: {
+    label: "左手法",
+    instant: () => solveWallFollowerInstant(true),
+    animated: () => wallFollowerAnimated(true),
+    optimal: false,
+  },
+  bfs: { label: "BFS", instant: solveBfsInstant, animated: bfsAnimated, optimal: true },
+  dfs: { label: "DFS", instant: solveDfsInstant, animated: dfsAnimated, optimal: false },
+  astar: { label: "A*", instant: solveAstarInstant, animated: astarAnimated, optimal: true },
+};
+
+const SOLVER_ORDER = ["bfs", "astar", "dfs", "paintbrush", "right", "left"];
+
+function nowMs() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+// 現在の迷路上で全解法を即時実行し、経路長・探索セル数・所要時間・最短一致を集計する。
+// DOM に依存しないため、研究用途のベンチマークやテストからも利用できる。
+function solverComparison() {
+  const optimal = bfsDistances(state.start).get(posKey(state.goal));
+  const rows = SOLVER_ORDER.map((name) => {
+    const config = SOLVER_CONFIGS[name];
+    const startedAt = nowMs();
+    const result = config.instant();
+    const duration = nowMs() - startedAt;
+    const solved = Boolean(result.path);
+    const pathLength = solved ? result.path.length - 1 : null;
+    return {
+      name,
+      label: config.label,
+      solved,
+      pathLength,
+      isShortest: solved && pathLength === optimal,
+      visited: result.visited ? result.visited.size : 0,
+      duration,
+    };
+  });
+  return { optimal, rows };
+}
+
 function finishSolver(label, result, startedAt) {
   const duration = performance.now() - startedAt;
   state.visited = result.visited || new Set();
@@ -1104,45 +1285,65 @@ function finishSolver(label, result, startedAt) {
   drawMaze();
   setMetrics(state.visited.size, state.path.length, duration);
   setStatus(result.path ? `${label}: 完了 (${floorName(state.visibleFloor)})` : `${label}: 解なし`);
+
+  if (result.path) {
+    const optimalLen = bfsDistances(state.start).get(posKey(state.goal));
+    const len = result.path.length - 1;
+    const note = len === optimalLen ? "（最短）" : `（最短は ${optimalLen} ステップ）`;
+    announce(
+      `${label} が完了しました。経路長 ${len} ステップ${note}、` +
+        `探索セル数 ${state.visited.size}、所要時間 ${duration.toFixed(1)} ミリ秒。`,
+    );
+  } else {
+    announce(`${label}: 経路が見つかりませんでした。`);
+  }
+}
+
+function clearComparison() {
+  if (dom.compareOutput) dom.compareOutput.innerHTML = "";
+}
+
+function renderComparison(stats) {
+  if (!dom.compareOutput) return;
+  const rowsHtml = stats.rows
+    .map((row) => {
+      const path = row.solved ? row.pathLength : "—";
+      const best = row.isShortest ? ' <span class="badge">最短</span>' : "";
+      const cls = row.solved ? "" : ' class="cmp-fail"';
+      return `<tr${cls}><th scope="row">${row.label}${best}</th><td>${path}</td><td>${row.visited.toLocaleString("ja-JP")}</td><td>${row.duration.toFixed(2)}</td></tr>`;
+    })
+    .join("");
+
+  dom.compareOutput.innerHTML =
+    `<table class="cmp-table"><caption>最短経路長: ${stats.optimal} ステップ</caption>` +
+    "<thead><tr><th scope=\"col\">解法</th><th scope=\"col\">経路長</th><th scope=\"col\">探索</th><th scope=\"col\">時間(ms)</th></tr></thead>" +
+    `<tbody>${rowsHtml}</tbody></table>`;
+}
+
+function runComparison() {
+  if (state.running) return;
+  clearVisualization();
+  setVisibleFloor(state.start.z, false);
+  drawMaze();
+  setStatus("比較: 全アルゴリズムを実行中...");
+
+  const stats = solverComparison();
+  renderComparison(stats);
+  setStatus("比較: 完了");
+
+  const shortestSolvers = stats.rows.filter((r) => r.isShortest).map((r) => r.label);
+  const failed = stats.rows.filter((r) => !r.solved).map((r) => r.label);
+  announce(
+    `全${stats.rows.length}解法を比較しました。最短経路長は ${stats.optimal} ステップ。` +
+      `最短を達成したのは ${shortestSolvers.join("、") || "なし"}。` +
+      (failed.length ? `経路を見つけられなかったのは ${failed.join("、")}。` : "全解法がゴールに到達しました。"),
+  );
 }
 
 async function runSolver(name) {
   if (state.running) return;
 
-  const configs = {
-    paintbrush: {
-      label: "Paintbrush",
-      instant: solvePaintbrushInstant,
-      animated: () => paintbrushAnimated(),
-    },
-    right: {
-      label: "右手法",
-      instant: () => solveWallFollowerInstant(false),
-      animated: () => wallFollowerAnimated(false),
-    },
-    left: {
-      label: "左手法",
-      instant: () => solveWallFollowerInstant(true),
-      animated: () => wallFollowerAnimated(true),
-    },
-    bfs: {
-      label: "BFS",
-      instant: solveBfsInstant,
-      animated: bfsAnimated,
-    },
-    dfs: {
-      label: "DFS",
-      instant: solveDfsInstant,
-      animated: dfsAnimated,
-    },
-    astar: {
-      label: "A*",
-      instant: solveAstarInstant,
-      animated: astarAnimated,
-    },
-  };
-
-  const config = configs[name];
+  const config = SOLVER_CONFIGS[name];
   if (!config) return;
 
   clearVisualization();
@@ -1236,6 +1437,12 @@ function handleKeydown(event) {
   movePlayer(move[0], move[1]);
 }
 
+// レンジ入力の現在値を隣接ラベルに反映する。
+function syncRangeLabel(input, label, format) {
+  if (!input || !label) return;
+  label.textContent = format(input.value);
+}
+
 function bindEvents() {
   dom.generate.addEventListener("click", generateGame);
   dom.reset.addEventListener("click", resetPlayerAndView);
@@ -1246,6 +1453,35 @@ function bindEvents() {
     setControlsRunning(false);
     setStatus("停止しました");
   });
+
+  if (dom.randomSeed) {
+    dom.randomSeed.addEventListener("click", () => {
+      if (dom.seed) dom.seed.value = String(randomSeed());
+      generateGame();
+    });
+  }
+  if (dom.compare) {
+    dom.compare.addEventListener("click", runComparison);
+  }
+
+  syncRangeLabel(dom.braid, dom.braidValue, (v) => `${v}%`);
+  syncRangeLabel(dom.stairDensity, dom.stairDensityValue, (v) => v);
+  syncRangeLabel(dom.attempts, dom.attemptsValue, (v) => v);
+  if (dom.braid) {
+    dom.braid.addEventListener("input", () =>
+      syncRangeLabel(dom.braid, dom.braidValue, (v) => `${v}%`),
+    );
+  }
+  if (dom.stairDensity) {
+    dom.stairDensity.addEventListener("input", () =>
+      syncRangeLabel(dom.stairDensity, dom.stairDensityValue, (v) => v),
+    );
+  }
+  if (dom.attempts) {
+    dom.attempts.addEventListener("input", () =>
+      syncRangeLabel(dom.attempts, dom.attemptsValue, (v) => v),
+    );
+  }
   document.querySelectorAll("[data-solver]").forEach((button) => {
     button.addEventListener("click", () => runSolver(button.dataset.solver));
   });
@@ -1279,8 +1515,12 @@ if (typeof module !== "undefined" && module.exports) {
     posFromKey,
     samePos,
     parseSize,
+    makeRng,
+    setSeed,
     generateDfsMaze,
+    braidMaze,
     buildStairs,
+    solverComparison,
     isOpen,
     getNeighbors,
     heuristic,
