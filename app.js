@@ -16,6 +16,7 @@ const COLORS = {
   stairDown: "#7c3aed",
   stairBoth: "#0891b2",
   fog: "#000000", // マイクロマウス視点で未踏・未視認のセル
+  backtrack: "#ea580c", // 一度通った道を戻った（再走した）セル
 };
 
 const DIRECTIONS = [
@@ -162,6 +163,7 @@ const state = {
   skipReplay: false, // ルート再生のスキップ要求
   fog: false, // マイクロマウス視点（霧）モード
   revealed: new Set(), // 霧モードで判明済みのセル（key の集合）
+  backtrack: new Set(), // マイクロマウスが再走（引き返し）したセル
 };
 
 class MinHeap {
@@ -375,8 +377,21 @@ function clearVisualization() {
   state.tempBlock = null;
   state.finalPathMode = false;
   state.heat = null;
+  state.backtrack = new Set();
   updateHeatmapLegend();
   setMetrics();
+}
+
+// 経路の中で2回以上通過したセル（＝引き返した道）の集合を返す。
+function computeBacktrackSet(path) {
+  const seen = new Set();
+  const back = new Set();
+  for (const cell of path || []) {
+    const key = posKey(cell);
+    if (seen.has(key)) back.add(key);
+    else seen.add(key);
+  }
+  return back;
 }
 
 function resetPlayerAndView() {
@@ -956,6 +971,7 @@ function drawFloorBlock(floor, ox, oy, layout) {
           color = heatColor(state.heat.order.get(key) / state.heat.total);
         }
         if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
+        if (state.backtrack.has(key)) color = COLORS.backtrack; // 引き返した道
         if (key === state.candidateKey) color = COLORS.candidate;
         if (key === state.currentKey) color = COLORS.player;
       }
@@ -986,7 +1002,9 @@ function drawFloorBlock(floor, ox, oy, layout) {
   }
 
   // 正解ルートを連続した太線で描く（暗い縁取り + 明色）。階をまたぐ箇所で線を切る。
-  if (state.path.length > 1) {
+  // 霧モード（マイクロマウス）では太線でセル色が隠れないよう線は描かず、
+  // セルの塗り分け（往路=緑 / 引き返し=橙）で経路を表す。
+  if (state.path.length > 1 && !state.fog) {
     const stroke = (color, w) => {
       ctx.strokeStyle = color;
       ctx.lineWidth = w;
@@ -1133,6 +1151,7 @@ function drawFloorIso(floor, originX, originY) {
           color = heatColor(state.heat.order.get(key) / state.heat.total);
         }
         if (state.pathKeys.has(key)) color = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
+        if (state.backtrack.has(key)) color = COLORS.backtrack; // 引き返した道
         if (key === state.candidateKey) color = COLORS.candidate;
         if (key === state.currentKey) color = COLORS.player;
       }
@@ -1146,7 +1165,8 @@ function drawFloorIso(floor, originX, originY) {
   }
 
   // 正解ルート（変換下でそのまま描くと立体的な線になる）
-  if (state.path.length > 1) {
+  // 霧モードでは線を描かず、セルの塗り分けで往路/引き返しを表す。
+  if (state.path.length > 1 && !state.fog) {
     const stroke = (color, w) => {
       ctx.strokeStyle = color;
       ctx.lineWidth = w;
@@ -1899,7 +1919,9 @@ async function animateMicromouse(startedAt, token) {
   const { batchSize, sleepFactor } = animationPacing();
   const generator = micromouseAnimated();
   const trail = [];
+  const walked = new Set(); // 一度でも通ったセル
   state.finalPathMode = false;
+  state.backtrack = new Set();
 
   while (state.running && token === state.runToken) {
     let done = null;
@@ -1914,6 +1936,10 @@ async function animateMicromouse(startedAt, token) {
       last = event;
       state.player = event.pos;
       trail.push(event.pos);
+      // すでに通ったセルに再び入った＝引き返し。色分け用に記録する。
+      const pkey = posKey(event.pos);
+      if (walked.has(pkey)) state.backtrack.add(pkey);
+      else walked.add(pkey);
       for (const key of event.sensed) {
         state.revealed.add(key);
         state.visited.add(key);
@@ -2816,6 +2842,8 @@ async function runSolver(name) {
       if (isMicromouse && result) {
         // 即時実行でも探索済みセルを判明済みにして霧を晴らす。
         for (const key of result.visited) state.revealed.add(key);
+        // 引き返した道を色分けできるよう記録する。
+        state.backtrack = computeBacktrackSet(result.path);
       }
     }
 
