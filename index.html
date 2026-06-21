@@ -24,6 +24,14 @@
           <canvas id="mazeCanvas" tabindex="0" aria-label="生成された迷路"></canvas>
         </div>
 
+        <!-- 探索ヒートマップの凡例（青=早い → 赤=遅い）。ヒートマップ表示中のみ出す -->
+        <div id="heatmapLegend" class="heatmap-legend" hidden aria-hidden="true">
+          <span class="heatmap-legend__title">探索順</span>
+          <span class="heatmap-legend__cap">早い</span>
+          <span class="heatmap-legend__bar" role="img" aria-label="探索順のカラースケール（青が早く赤が遅い）"></span>
+          <span class="heatmap-legend__cap">遅い</span>
+        </div>
+
         <!-- スクリーンリーダー向け詳細アナウンス（視覚的には非表示） -->
         <p id="announce" class="sr-only" aria-live="polite" role="status"></p>
       </section>

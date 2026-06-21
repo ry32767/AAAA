@@ -153,6 +153,46 @@ canvas {
   border-radius: 4px;
 }
 
+/* 探索ヒートマップの凡例 */
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 0.82rem;
+  color: var(--muted, #647087);
+}
+
+.heatmap-legend[hidden] {
+  display: none;
+}
+
+.heatmap-legend__title {
+  font-weight: 700;
+  color: inherit;
+}
+
+.heatmap-legend__cap {
+  white-space: nowrap;
+}
+
+.heatmap-legend__bar {
+  flex: 1;
+  max-width: 220px;
+  height: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line-strong, #cbd5e1);
+  /* heatColor() の hsl(210→0) に対応（青=早い → 赤=遅い） */
+  background: linear-gradient(
+    to right,
+    hsl(210, 85%, 60%),
+    hsl(158, 85%, 60%),
+    hsl(105, 85%, 60%),
+    hsl(53, 85%, 60%),
+    hsl(0, 85%, 60%)
+  );
+}
+
 .control-panel {
   display: flex;
   flex-direction: column;

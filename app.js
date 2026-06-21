@@ -103,6 +103,7 @@ const dom = IS_BROWSER
       compare: document.querySelector("#compareButton"),
       compareOutput: document.querySelector("#compareOutput"),
       heatmap: document.querySelector("#heatmapToggle"),
+      heatmapLegend: document.querySelector("#heatmapLegend"),
       batchRuns: document.querySelector("#batchRuns"),
       batch: document.querySelector("#batchButton"),
       batchOutput: document.querySelector("#batchOutput"),
@@ -155,6 +156,8 @@ const state = {
   lastSweep: null, // 直近のパラメータ掃引結果（エクスポート用）
   running: false,
   runToken: 0,
+  replaying: false, // ルート再生（最短経路のなぞり）中か
+  skipReplay: false, // ルート再生のスキップ要求
 };
 
 class MinHeap {
@@ -341,6 +344,24 @@ function setPath(path) {
   state.pathKeys = new Set(state.path.map(posKey));
 }
 
+// OS の「視差効果を減らす / 動きを減らす」設定を尊重する。
+// 有効時は装飾的な演出（ワープ・ルートなぞり再生）を省き、即座に結果を見せる。
+function prefersReducedMotion() {
+  return (
+    IS_BROWSER &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+// 探索ヒートマップの凡例（青=早い → 赤=遅い）の表示/非表示を切り替える。
+function updateHeatmapLegend() {
+  if (!dom.heatmapLegend) return;
+  const show = Boolean(dom.heatmap && dom.heatmap.checked && state.heat);
+  dom.heatmapLegend.hidden = !show;
+  dom.heatmapLegend.setAttribute("aria-hidden", show ? "false" : "true");
+}
+
 function clearVisualization() {
   state.visited = new Set();
   state.rejected = new Set();
@@ -350,6 +371,7 @@ function clearVisualization() {
   state.tempBlock = null;
   state.finalPathMode = false;
   state.heat = null;
+  updateHeatmapLegend();
   setMetrics();
 }
 
@@ -1981,6 +2003,13 @@ function drawWarpOverlay(t, up, tint, fromCell, toCell) {
 // 前半は出発階を、中間で表示階を切り替え、後半は到着階を背景に描く。
 // 停止/再実行されたら false を返す。
 async function playFloorWarp(fromCell, toCell, direction, token) {
+  // 動きを減らす設定 or スキップ要求時は、演出せず即座に階を切り替える。
+  if (prefersReducedMotion() || state.skipReplay) {
+    setVisibleFloor(toCell.z, false);
+    drawMaze();
+    return state.running && token === state.runToken;
+  }
+
   const up = direction === "up";
   const tint = up ? COLORS.stairUp : COLORS.stairDown;
   const { sleepFactor } = animationPacing();
@@ -1988,7 +2017,7 @@ async function playFloorWarp(fromCell, toCell, direction, token) {
   const start = performance.now();
   let switched = false;
 
-  while (state.running && token === state.runToken) {
+  while (state.running && token === state.runToken && !state.skipReplay) {
     const t = (performance.now() - start) / duration;
     if (t >= 1) break;
     if (t >= 0.5 && !switched) {
@@ -2023,6 +2052,21 @@ function pathCrossesFloors(path) {
 async function animateSolutionTraversal(path, token, label) {
   if (!path || path.length < 2) return true;
 
+  // 操作用プレイヤーは始点へ戻し、表示は終点の階に合わせて締める共通処理。
+  const finalize = () => {
+    state.finalPathMode = true;
+    state.player = { ...path[0] };
+    state.currentKey = null;
+    setVisibleFloor(path[path.length - 1].z, false);
+    drawMaze();
+  };
+
+  // 動きを減らす設定では、なぞり再生を行わず結果だけを表示する。
+  if (prefersReducedMotion()) {
+    finalize();
+    return true;
+  }
+
   const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
   // パス長によらず描画回数を概ね一定(~TARGET)に保つ。再生はゆっくり見せたいので
   // 描画回数を多めに取り、1 セルあたりの待機も探索より長めにする。
@@ -2030,46 +2074,50 @@ async function animateSolutionTraversal(path, token, label) {
   const batchSize = Math.max(1, Math.ceil((path.length - 1) / TARGET));
   const stepMs = Math.min(speed.step * 1.2, 110); // 遅すぎ防止に上限を設ける
 
+  state.replaying = true;
+  state.skipReplay = false;
   state.finalPathMode = true;
   state.player = { ...path[0] };
   setVisibleFloor(state.player.z, false);
   drawMaze();
 
-  let pending = 0;
-  for (let i = 1; i < path.length; i += 1) {
-    if (!state.running || token !== state.runToken) return false;
-    const cell = path[i];
+  try {
+    let pending = 0;
+    for (let i = 1; i < path.length; i += 1) {
+      if (!state.running || token !== state.runToken) return false;
+      if (state.skipReplay) break; // クリック/キーで最終結果へスキップ
+      const cell = path[i];
 
-    if (cell.z !== state.player.z) {
-      // 直前のセル（階段の足元）まで進めてから、その地点でワープ演出に入る。
-      const fromCell = { ...path[i - 1] };
-      state.player = fromCell;
-      state.currentKey = posKey(state.player);
-      const direction = cell.z > fromCell.z ? "up" : "down";
-      setStatus(`${label}: ${direction === "up" ? "上り" : "下り"}ワープ`);
-      const ok = await playFloorWarp(fromCell, cell, direction, token);
-      if (!ok) return false;
-      pending = 0;
+      if (cell.z !== state.player.z) {
+        // 直前のセル（階段の足元）まで進めてから、その地点でワープ演出に入る。
+        const fromCell = { ...path[i - 1] };
+        state.player = fromCell;
+        state.currentKey = posKey(state.player);
+        const direction = cell.z > fromCell.z ? "up" : "down";
+        setStatus(`${label}: ${direction === "up" ? "上り" : "下り"}ワープ`);
+        const ok = await playFloorWarp(fromCell, cell, direction, token);
+        if (!ok && !state.skipReplay) return false;
+        pending = 0;
+      }
+
+      state.player = { ...cell };
+      pending += 1;
+
+      if (pending >= batchSize || i === path.length - 1) {
+        state.currentKey = posKey(state.player);
+        setVisibleFloor(state.player.z, false);
+        drawMaze();
+        setStatus(`${label}: ルート再生（クリックでスキップ） (${floorName(state.visibleFloor)})`);
+        await sleep(stepMs);
+        pending = 0;
+      }
     }
-
-    state.player = { ...cell };
-    pending += 1;
-
-    if (pending >= batchSize || i === path.length - 1) {
-      state.currentKey = posKey(state.player);
-      setVisibleFloor(state.player.z, false);
-      drawMaze();
-      setStatus(`${label}: ルート再生 (${floorName(state.visibleFloor)})`);
-      await sleep(stepMs);
-      pending = 0;
-    }
+  } finally {
+    state.replaying = false;
   }
 
-  // 操作用プレイヤーは始点へ戻し、表示は終点の階に合わせて締める。
-  state.player = { ...path[0] };
-  state.currentKey = null;
-  setVisibleFloor(path[path.length - 1].z, false);
-  drawMaze();
+  if (!state.running || token !== state.runToken) return false;
+  finalize();
   return true;
 }
 
@@ -2448,6 +2496,7 @@ async function runSolver(name) {
       if (dom.heatmap && dom.heatmap.checked && result.path) {
         const visit = solverVisitOrder(name);
         state.heat = { order: visit.order, total: visit.total };
+        updateHeatmapLegend();
         drawMaze();
       }
       // アニメーション有効かつ解答が階をまたぐ場合は、ルートをなぞりながら
@@ -2497,6 +2546,13 @@ function movePlayer(dx, dy) {
 }
 
 function handleKeydown(event) {
+  // ルート再生中は Enter / Space で最終結果へスキップ。
+  if (state.replaying && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    state.skipReplay = true;
+    return;
+  }
+
   const keyMap = {
     ArrowUp: [0, -1],
     ArrowDown: [0, 1],
@@ -2600,6 +2656,7 @@ function bindEvents() {
         state.heat = null;
         drawMaze();
       }
+      updateHeatmapLegend();
     });
   }
 
@@ -2637,6 +2694,10 @@ function bindEvents() {
     });
   });
   window.addEventListener("keydown", handleKeydown);
+  // ルート再生中はキャンバスクリックで最終結果へスキップ。
+  dom.canvas.addEventListener("click", () => {
+    if (state.replaying) state.skipReplay = true;
+  });
 }
 
 if (IS_BROWSER) {
