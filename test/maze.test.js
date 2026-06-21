@@ -381,3 +381,96 @@ test("solverVisitOrder は探索順を 0..total-1 で連番付けする", () => 
   // 連番（重複なし）であること。
   assert.equal(new Set(indices).size, indices.length, "indices must be unique");
 });
+
+// --- アニメーション速度のサイズ相対化 ----------------------------------------
+
+// 指定サイズの迷路を複数シードで生成し、推定アニメーション時間（累積待機 ms と
+// 描画回数）の平均を返す。シードを変えて平均化することで、開始/ゴール配置や
+// 迷路構造のばらつきを均す。
+function averageAnimation(width, height, floorCount, solver, speed, applyPacing, seeds) {
+  let totalSleep = 0;
+  let draws = 0;
+  for (let s = 0; s < seeds; s += 1) {
+    maze.setSeed(1000 + s);
+    setupMaze(width, height, floorCount);
+    const est = maze.estimateAnimationDuration(solver, speed, applyPacing);
+    totalSleep += est.totalSleep;
+    draws += est.draws;
+  }
+  return { totalSleep: totalSleep / seeds, draws: draws / seeds };
+}
+
+const ANIM_SIZES = [
+  [81, 61],
+  [121, 91],
+  [151, 111],
+  [201, 151],
+];
+const FLOORS = 3;
+const SEEDS = 8;
+
+function spread(values) {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return max / min;
+}
+
+test("animationSizeRatio は最小サイズで 1、大きい迷路ほど増える", () => {
+  assert.equal(maze.animationSizeRatio(81, 61, 1), 1, "基準（最小）サイズで 1");
+  assert.ok(maze.animationSizeRatio(201, 151, 3) > 10, "大きい迷路では 1 を大きく超える");
+  assert.ok(
+    maze.animationSizeRatio(121, 91, 3) > maze.animationSizeRatio(81, 61, 3),
+    "大きい迷路ほど比が大きい",
+  );
+});
+
+test("animationPacing は大きい迷路でバッチ増・基準サイズは等倍", () => {
+  const big = maze.animationPacing(maze.animationSizeRatio(201, 151, 3));
+  const ref = maze.animationPacing(maze.animationSizeRatio(81, 61, 1));
+
+  assert.ok(big.batchSize >= 10, "大きい迷路は多数ステップをまとめる");
+  assert.equal(ref.batchSize, 1, "基準サイズはバッチ 1");
+  assert.equal(ref.sleepFactor, 1, "基準サイズは待機等倍");
+  // 総再生時間が一定になるよう batchSize と sleepFactor が補い合う。
+  assert.ok(
+    Math.abs(big.batchSize / big.sleepFactor - maze.animationSizeRatio(201, 151, 3)) < 1,
+    "batchSize / sleepFactor は基準比に一致する",
+  );
+});
+
+test("ペース配分により normal の総待機時間が迷路サイズによらずほぼ一定", () => {
+  const scaled = ANIM_SIZES.map(
+    ([w, h]) => averageAnimation(w, h, FLOORS, "bfs", "normal", true, SEEDS).totalSleep,
+  );
+  const unscaled = ANIM_SIZES.map(
+    ([w, h]) => averageAnimation(w, h, FLOORS, "bfs", "normal", false, SEEDS).totalSleep,
+  );
+
+  const scaledSpread = spread(scaled);
+  const unscaledSpread = spread(unscaled);
+
+  // 従来（等倍）は迷路サイズに比例して総時間が大きくばらつく。
+  assert.ok(unscaledSpread > 2.5, `従来の総待機時間は大きくばらつくはず (実測 ${unscaledSpread.toFixed(2)}x)`);
+  // ペース配分後はサイズ差が大幅に縮む。
+  assert.ok(scaledSpread < 1.6, `ペース配分後の総待機時間は均一化されるはず (実測 ${scaledSpread.toFixed(2)}x)`);
+  assert.ok(
+    scaledSpread < unscaledSpread,
+    `ペース配分は均一性を改善するはず (${scaledSpread.toFixed(2)}x < ${unscaledSpread.toFixed(2)}x)`,
+  );
+});
+
+test("ペース配分により fast の描画回数が迷路サイズによらずほぼ一定", () => {
+  // fast は flood=0 のため待機では均一化できず、バッチ（描画回数）で均一化する。
+  const scaled = ANIM_SIZES.map(
+    ([w, h]) => averageAnimation(w, h, FLOORS, "bfs", "fast", true, SEEDS).draws,
+  );
+  const unscaled = ANIM_SIZES.map(
+    ([w, h]) => averageAnimation(w, h, FLOORS, "bfs", "fast", false, SEEDS).draws,
+  );
+
+  const scaledSpread = spread(scaled);
+  const unscaledSpread = spread(unscaled);
+
+  assert.ok(unscaledSpread > 2.5, `従来の描画回数は大きくばらつくはず (実測 ${unscaledSpread.toFixed(2)}x)`);
+  assert.ok(scaledSpread < 1.6, `ペース配分後の描画回数は均一化されるはず (実測 ${scaledSpread.toFixed(2)}x)`);
+});
