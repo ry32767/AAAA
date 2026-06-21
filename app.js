@@ -1898,78 +1898,112 @@ function finishSolver(label, result, startedAt) {
   }
 }
 
-// 階をまたぐ瞬間の演出オーバーレイ。t は 0→1 の進捗。
-// 上り(up=true)は青系・▲・上方向スライド、下りは紫系・▼・下方向スライドで区別する。
-function drawFloorTransitionOverlay(t, up, tint, glyph, label) {
-  const W = dom.canvas.width;
-  const H = dom.canvas.height;
-  const fade = Math.sin(clamp(t, 0, 1) * Math.PI); // フェードイン→アウト(0→1→0)
+// 指定セルの画面座標（中心）を現在のレイアウトで求める。平面表示（1階ずつ/
+// 全階縦積み）のみ対応し、表示外の階や 3D 俯瞰では null を返す（呼び出し側で
+// 画面中央にフォールバックする）。
+function cellScreenPos(pos) {
+  if (effectiveViewMode() === "iso") return null;
+  const layout = floorLayout();
+  const idx = layout.floors.indexOf(pos.z);
+  if (idx === -1) return null;
+  const cs = state.cellSize;
+  const oy = idx * layout.stepY + layout.labelH;
+  return { sx: pos.x * cs + cs / 2, sy: oy + pos.y * cs + cs / 2 };
+}
+
+// 階をまたぐ「ワープ」演出を 1 セル位置に描く。t は 0→1 の進捗。
+// 前半(出発)はリングが中心へ収束しオーブが吸い込まれる、後半(到着)は中心から
+// リングが拡散しオーブが現れる。上り(up)は青系・▲・上方向、下りは紫系・▼・下方向。
+function drawWarpOverlay(t, up, tint, fromCell, toCell) {
+  const arriving = t >= 0.5;
+  const cell = arriving ? toCell : fromCell;
+  const pos =
+    cellScreenPos(cell) || { sx: dom.canvas.width / 2, sy: dom.canvas.height / 2 };
+  const local = arriving ? (t - 0.5) / 0.5 : t / 0.5; // 各フェーズ内 0→1
+  const cs = state.cellSize;
+  const baseR = Math.max(14, cs * 7);
+  const dir = up ? -1 : 1;
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-  // 画面全体を進行方向の色で薄く染める
-  ctx.globalAlpha = 0.18 * fade;
+  // 縦方向の光の柱（垂直移動を示唆）
+  ctx.globalAlpha = 0.22 * Math.sin(clamp(t, 0, 1) * Math.PI);
   ctx.fillStyle = tint;
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(pos.sx - cs * 1.2, 0, cs * 2.4, dom.canvas.height);
 
-  // 中央の方向バッジ
-  const cx = W / 2;
-  const cy = H / 2;
-  const r = Math.max(36, Math.min(W, H) * 0.16);
+  // 同心リング（出発=外→中心へ収束 / 到着=中心→外へ拡散）
+  ctx.lineWidth = Math.max(2, cs * 0.7);
+  ctx.strokeStyle = tint;
+  for (let k = 0; k < 4; k += 1) {
+    const phase = (local + k * 0.25) % 1;
+    const rr = arriving ? phase * baseR : (1 - phase) * baseR;
+    ctx.globalAlpha = (1 - phase) * 0.75;
+    ctx.beginPath();
+    ctx.arc(pos.sx, pos.sy, Math.max(1, rr), 0, TAU);
+    ctx.stroke();
+  }
 
-  ctx.globalAlpha = 0.9 * fade;
+  // 中心のオーブ（出発で縮小・到着で拡大）
+  const orbR = (arriving ? local : 1 - local) * baseR * 0.5;
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = tint;
   ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, TAU);
-  ctx.fillStyle = tint;
+  ctx.arc(pos.sx, pos.sy, Math.max(2, orbR), 0, TAU);
   ctx.fill();
-  ctx.lineWidth = Math.max(3, r * 0.1);
+  ctx.lineWidth = Math.max(2, cs * 0.5);
   ctx.strokeStyle = "#ffffff";
   ctx.stroke();
 
-  // 進行方向へ流れる矢印（3 連シェブロン）
-  const dir = up ? -1 : 1;
-  const slide = (t % 1) * r * 0.7 * dir;
+  // 進行方向へ流れる矢印
+  const glyph = up ? "▲" : "▼";
+  const flow = t % 1;
   ctx.fillStyle = "#ffffff";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.font = `bold ${Math.round(r * 0.7)}px system-ui, sans-serif`;
-  for (const off of [-1, 0, 1]) {
-    ctx.globalAlpha = (0.95 - Math.abs(off) * 0.35) * fade;
-    ctx.fillText(glyph, cx, cy + off * r * 0.6 + slide);
+  ctx.font = `bold ${Math.round(baseR * 0.55)}px system-ui, sans-serif`;
+  for (let o = 0; o < 3; o += 1) {
+    const f = (o * 0.4 + flow) % 1;
+    ctx.globalAlpha = (1 - Math.abs(f - 0.5) * 1.6) * 0.9;
+    ctx.fillText(glyph, pos.sx, pos.sy + dir * (f - 0.5) * baseR * 2.4);
   }
 
   // ラベル（上り/下り）
-  ctx.globalAlpha = fade;
+  ctx.globalAlpha = Math.sin(clamp(t, 0, 1) * Math.PI);
   ctx.fillStyle = "#ffffff";
-  ctx.font = `bold ${Math.round(r * 0.34)}px system-ui, sans-serif`;
-  ctx.fillText(label, cx, cy + r * 1.45);
+  ctx.font = `bold ${Math.round(baseR * 0.3)}px system-ui, sans-serif`;
+  ctx.fillText(up ? "上り" : "下り", pos.sx, pos.sy + baseR * 1.5);
 
   ctx.restore();
 }
 
-// 1 回分の階層遷移演出を再生する。targetFloor を表示に切り替えてから
-// オーバーレイをアニメーションする。停止/再実行されたら false を返す。
-async function playFloorTransition(direction, token, targetFloor) {
-  if (targetFloor != null) setVisibleFloor(targetFloor, false);
+// 現在地(fromCell)から上下階の同一地点(toCell)へワープする演出を再生する。
+// 前半は出発階を、中間で表示階を切り替え、後半は到着階を背景に描く。
+// 停止/再実行されたら false を返す。
+async function playFloorWarp(fromCell, toCell, direction, token) {
   const up = direction === "up";
   const tint = up ? COLORS.stairUp : COLORS.stairDown;
-  const glyph = up ? "▲" : "▼";
-  const label = up ? "上り" : "下り";
-  // サイズ相対のテンポに合わせ、待機倍率で演出時間も調整する。
   const { sleepFactor } = animationPacing();
-  const duration = clamp(360 * sleepFactor, 220, 700);
+  const duration = clamp(720 * sleepFactor, 480, 1300);
   const start = performance.now();
+  let switched = false;
 
   while (state.running && token === state.runToken) {
     const t = (performance.now() - start) / duration;
     if (t >= 1) break;
+    if (t >= 0.5 && !switched) {
+      setVisibleFloor(toCell.z, false); // 中間で到着階へ切り替え
+      switched = true;
+    } else if (t < 0.5) {
+      setVisibleFloor(fromCell.z, false);
+    }
     drawMaze();
-    drawFloorTransitionOverlay(t, up, tint, glyph, label);
+    drawWarpOverlay(t, up, tint, fromCell, toCell);
     await sleep(16);
   }
 
   if (!state.running || token !== state.runToken) return false;
+  setVisibleFloor(toCell.z, false);
   drawMaze();
   return true;
 }
@@ -1990,10 +2024,11 @@ async function animateSolutionTraversal(path, token, label) {
   if (!path || path.length < 2) return true;
 
   const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
-  // パス長によらず描画回数を概ね一定(~TARGET)に保つ。
-  const TARGET = 120;
+  // パス長によらず描画回数を概ね一定(~TARGET)に保つ。再生はゆっくり見せたいので
+  // 描画回数を多めに取り、1 セルあたりの待機も探索より長めにする。
+  const TARGET = 160;
   const batchSize = Math.max(1, Math.ceil((path.length - 1) / TARGET));
-  const stepMs = speed.step * 0.4;
+  const stepMs = Math.min(speed.step * 1.2, 110); // 遅すぎ防止に上限を設ける
 
   state.finalPathMode = true;
   state.player = { ...path[0] };
@@ -2006,12 +2041,13 @@ async function animateSolutionTraversal(path, token, label) {
     const cell = path[i];
 
     if (cell.z !== state.player.z) {
-      // 直前のセルまで描いてから遷移演出に入る。
-      state.player = { ...path[i - 1] };
+      // 直前のセル（階段の足元）まで進めてから、その地点でワープ演出に入る。
+      const fromCell = { ...path[i - 1] };
+      state.player = fromCell;
       state.currentKey = posKey(state.player);
-      const direction = cell.z > state.player.z ? "up" : "down";
-      setStatus(`${label}: ${direction === "up" ? "上り階段" : "下り階段"}を通過`);
-      const ok = await playFloorTransition(direction, token, cell.z);
+      const direction = cell.z > fromCell.z ? "up" : "down";
+      setStatus(`${label}: ${direction === "up" ? "上り" : "下り"}ワープ`);
+      const ok = await playFloorWarp(fromCell, cell, direction, token);
       if (!ok) return false;
       pending = 0;
     }
