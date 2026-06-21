@@ -15,6 +15,7 @@ const COLORS = {
   stairUp: "#2563eb",
   stairDown: "#7c3aed",
   stairBoth: "#0891b2",
+  fog: "#000000", // マイクロマウス視点で未踏・未視認のセル
 };
 
 const DIRECTIONS = [
@@ -104,6 +105,7 @@ const dom = IS_BROWSER
       compareOutput: document.querySelector("#compareOutput"),
       heatmap: document.querySelector("#heatmapToggle"),
       heatmapLegend: document.querySelector("#heatmapLegend"),
+      fogToggle: document.querySelector("#fogToggle"),
       batchRuns: document.querySelector("#batchRuns"),
       batch: document.querySelector("#batchButton"),
       batchOutput: document.querySelector("#batchOutput"),
@@ -158,6 +160,8 @@ const state = {
   runToken: 0,
   replaying: false, // ルート再生（最短経路のなぞり）中か
   skipReplay: false, // ルート再生のスキップ要求
+  fog: false, // マイクロマウス視点（霧）モード
+  revealed: new Set(), // 霧モードで判明済みのセル（key の集合）
 };
 
 class MinHeap {
@@ -318,6 +322,7 @@ function floorName(index) {
 
 // 実際に使う表示モード。1 階しかなければ常に single。
 function effectiveViewMode() {
+  if (state.fog) return "single"; // 霧モードは自分のいる階だけ見える
   if (state.floorCount <= 1) return "single";
   return state.viewMode;
 }
@@ -379,8 +384,12 @@ function resetPlayerAndView() {
   state.player = { ...state.start };
   setVisibleFloor(state.player.z, false);
   clearVisualization();
+  if (state.fog) {
+    state.revealed = new Set();
+    revealFrom(state.player);
+  }
   drawMaze();
-  setStatus("手動操作モード");
+  setStatus(state.fog ? "マイクロマウス視点: 矢印/WASDで移動してゴールを探そう" : "手動操作モード");
   dom.canvas.focus({ preventScroll: true });
 }
 
@@ -439,6 +448,64 @@ function getNeighbors(pos) {
 
 function heuristic(a, b) {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + FLOOR_HEURISTIC_COST * Math.abs(a.z - b.z);
+}
+
+function inBoundsXY(x, y) {
+  return x >= 0 && x < state.width && y >= 0 && y < state.height;
+}
+
+// マイクロマウス視点の可視セルを計算する（直進LOS＋廊下の壁）。
+// 現在地から4方向に直進し、壁に当たるまでの通路セルと、その廊下の左右の壁を
+// 明らかにする。曲がり角の先や壁の向こうは見えない。
+function computeVisibleCells(pos) {
+  const cells = new Set();
+  const z = pos.z;
+  const layer = state.layers[z];
+  const mark = (x, y) => {
+    if (inBoundsXY(x, y)) cells.add(keyFromXYZ(x, y, z));
+  };
+
+  mark(pos.x, pos.y);
+  for (const dir of DIRECTIONS) {
+    const perp = { x: dir.y, y: dir.x }; // 進行方向に垂直
+    let x = pos.x;
+    let y = pos.y;
+    while (true) {
+      const nx = x + dir.x;
+      const ny = y + dir.y;
+      if (!inBoundsXY(nx, ny)) break;
+      if (layer[ny][nx] === 1) {
+        mark(nx, ny); // 壁面は見える。そこで視線が止まる
+        break;
+      }
+      mark(nx, ny); // 通路
+      mark(nx + perp.x, ny + perp.y); // 廊下の左右（壁または開口）
+      mark(nx - perp.x, ny - perp.y);
+      x = nx;
+      y = ny;
+    }
+  }
+  return cells;
+}
+
+// 指定位置から見えるセルを判明済み集合に追加する。
+function revealFrom(pos) {
+  if (!state.revealed) state.revealed = new Set();
+  for (const key of computeVisibleCells(pos)) state.revealed.add(key);
+}
+
+// 霧（マイクロマウス視点）モードの ON/OFF を切り替える。
+// ON にすると判明済みを現在地の視界だけにリセットし、1階表示へ。
+function setFog(on) {
+  state.fog = Boolean(on);
+  if (dom.fogToggle) dom.fogToggle.checked = state.fog;
+  if (state.fog) {
+    state.revealed = new Set();
+    revealFrom(state.player);
+    setVisibleFloor(state.player.z, false);
+  }
+  updateFloorUi();
+  drawMaze();
 }
 
 function createFilledMaze(width, height) {
@@ -764,6 +831,10 @@ function generateGame() {
   state.visibleFloor = state.start.z;
   clearVisualization();
   clearComparison();
+  if (state.fog) {
+    state.revealed = new Set();
+    revealFrom(state.player);
+  }
   setControlsRunning(false);
   updateFloorUi();
   drawMaze();
@@ -877,6 +948,8 @@ function drawFloorBlock(floor, ox, oy, layout) {
         if (key === state.candidateKey) color = COLORS.candidate;
         if (key === state.currentKey) color = COLORS.player;
       }
+      // 霧モード: 未判明のセルは黒で塗りつぶす
+      if (state.fog && !state.revealed.has(key)) color = COLORS.fog;
       ctx.fillStyle = color;
       ctx.fillRect(ox + x * cs, oy + y * cs, cs, cs);
     }
@@ -911,7 +984,8 @@ function drawFloorBlock(floor, ox, oy, layout) {
       ctx.beginPath();
       let pen = false;
       for (const p of state.path) {
-        if (p.z !== floor) {
+        // 霧モードでは未判明セルの経路は描かない
+        if (p.z !== floor || (state.fog && !state.revealed.has(posKey(p)))) {
           pen = false;
           continue;
         }
@@ -934,6 +1008,7 @@ function drawFloorBlock(floor, ox, oy, layout) {
   for (const keyStr of state.stairsByKey.keys()) {
     const pos = posFromKey(keyStr);
     if (pos.z !== floor) continue;
+    if (state.fog && !state.revealed.has(keyStr)) continue; // 未発見の階段は隠す
     const role = stairRoleAt(pos);
     const glyph = role === "up" ? "▲" : role === "down" ? "▼" : "↕";
     const cx = ox + pos.x * cs + cs / 2;
@@ -946,7 +1021,9 @@ function drawFloorBlock(floor, ox, oy, layout) {
   if (state.start.z === floor) {
     drawMarker(ox + state.start.x * cs + cs / 2, oy + state.start.y * cs + cs / 2, markerR, COLORS.start, "#064e3b", "S");
   }
-  if (state.goal.z === floor) {
+  // 霧モードではゴールは発見するまで隠す
+  const goalVisible = !state.fog || state.revealed.has(posKey(state.goal));
+  if (state.goal.z === floor && goalVisible) {
     drawMarker(ox + state.goal.x * cs + cs / 2, oy + state.goal.y * cs + cs / 2, markerR, COLORS.goal, "#7f1d1d", "G");
   }
   if (state.player.z === floor && !samePos(state.player, state.start) && !samePos(state.player, state.goal)) {
@@ -1353,6 +1430,169 @@ function solveWallFollowerInstant(leftHand = false) {
   return runGeneratorToEnd(wallFollowerAnimated(leftHand));
 }
 
+// マイクロマウス探索（フラッドフィル法）。
+// エージェントは訪問セル周囲の壁だけを既知とし、未知は通行可と仮定して
+// ゴールからの距離場を作り、距離が小さくなる隣へ進む。視界(sensed)を毎ステップ
+// yield して霧を晴らす。距離場の再計算は「行き詰まり（局所最小）」のときだけに
+// 限定し、整数IDと TypedArray を使って高速化している（古典的な flood-fill 法）。
+function* micromouseAnimated() {
+  const W = state.width;
+  const H = state.height;
+  const F = state.floorCount;
+  const N = W * H * F;
+  const idOf = (x, y, z) => (z * H + y) * W + x;
+
+  const start = state.start;
+  const goal = state.goal;
+  const goalId = idOf(goal.x, goal.y, goal.z);
+
+  // 階段の隣接（id -> [id,...]）を事前構築。大半のセルは階段が無いので、
+  // フラッドフィルの内側ループでの Map 参照を避けるためフラグも持つ。
+  const stairIds = new Map();
+  const hasStair = new Uint8Array(N);
+  for (const [key, targets] of state.stairsByKey.entries()) {
+    const p = posFromKey(key);
+    const id = idOf(p.x, p.y, p.z);
+    stairIds.set(id, targets.map((t) => idOf(t.x, t.y, t.z)));
+    hasStair[id] = 1;
+  }
+
+  const wall = new Uint8Array(N); // 1 = 既知の壁
+  const known = new Uint8Array(N); // 1 = センス済み
+  const dist = new Int32Array(N);
+  const distVer = new Int32Array(N); // dist[i] が有効なのは distVer[i]===ver のとき
+  const queue = new Int32Array(N); // BFS キュー（毎回再利用）
+  let ver = 0;
+  const visited = new Set(); // 判明済み（霧を晴らす対象）
+
+  // ゴールからの距離場（既知壁のみ遮断、未知は通行可）を BFS で再計算する。
+  const flood = () => {
+    ver += 1;
+    dist[goalId] = 0;
+    distVer[goalId] = ver;
+    queue[0] = goalId;
+    let head = 0;
+    let tail = 1;
+    while (head < tail) {
+      const c = queue[head];
+      head += 1;
+      const nd = dist[c] + 1;
+      const z = (c / (W * H)) | 0;
+      const rem = c - z * W * H;
+      const y = (rem / W) | 0;
+      const x = rem - y * W;
+      let nid;
+      if (y > 0 && wall[(nid = c - W)] !== 1 && distVer[nid] !== ver) {
+        distVer[nid] = ver; dist[nid] = nd; queue[tail++] = nid;
+      }
+      if (y < H - 1 && wall[(nid = c + W)] !== 1 && distVer[nid] !== ver) {
+        distVer[nid] = ver; dist[nid] = nd; queue[tail++] = nid;
+      }
+      if (x > 0 && wall[(nid = c - 1)] !== 1 && distVer[nid] !== ver) {
+        distVer[nid] = ver; dist[nid] = nd; queue[tail++] = nid;
+      }
+      if (x < W - 1 && wall[(nid = c + 1)] !== 1 && distVer[nid] !== ver) {
+        distVer[nid] = ver; dist[nid] = nd; queue[tail++] = nid;
+      }
+      if (hasStair[c]) {
+        for (const sid of stairIds.get(c)) {
+          if (wall[sid] !== 1 && distVer[sid] !== ver) {
+            distVer[sid] = ver; dist[sid] = nd; queue[tail++] = sid;
+          }
+        }
+      }
+    }
+  };
+  const distOf = (id) => (distVer[id] === ver ? dist[id] : Infinity);
+
+  // pos 周囲をセンスして known / wall / visited を更新。
+  const sense = (p) => {
+    const sensed = computeVisibleCells(p);
+    for (const key of sensed) {
+      visited.add(key);
+      const c = posFromKey(key);
+      const id = idOf(c.x, c.y, c.z);
+      if (!known[id]) {
+        known[id] = 1;
+        wall[id] = isOpen(c.x, c.y, c.z) ? 0 : 1;
+      }
+    }
+    return sensed;
+  };
+
+  // 現在地から実際に移動できる隣（実迷路で開いている平面隣＋階段）。
+  const realMoves = (p) => {
+    const res = [];
+    for (const dir of DIRECTIONS) {
+      const nx = p.x + dir.x;
+      const ny = p.y + dir.y;
+      if (isOpen(nx, ny, p.z)) res.push({ x: nx, y: ny, z: p.z });
+    }
+    for (const s of getStairsFrom(p)) res.push({ ...s });
+    return res;
+  };
+
+  let pos = { ...start };
+  const path = [pos];
+  const cap = N * 4 + 100;
+  flood();
+
+  let steps = 0;
+  while (steps < cap) {
+    steps += 1;
+    const sensed = sense(pos);
+    yield { pos: { ...pos }, sensed };
+    if (samePos(pos, goal)) return { path, visited };
+
+    const here = idOf(pos.x, pos.y, pos.z);
+    const moves = realMoves(pos);
+    const prevId =
+      path.length > 1
+        ? idOf(path[path.length - 2].x, path[path.length - 2].y, path[path.length - 2].z)
+        : -1;
+    const pick = () => {
+      let best = null;
+      let bestD = Infinity;
+      let bestId = -1;
+      for (const m of moves) {
+        const id = idOf(m.x, m.y, m.z);
+        const d = distOf(id);
+        if (d < bestD || (d === bestD && bestId === prevId && id !== prevId)) {
+          bestD = d;
+          best = m;
+          bestId = id;
+        }
+      }
+      return { best, bestD };
+    };
+
+    let { best, bestD } = pick();
+    // 局所最小（下り坂の隣がない）なら、判明した壁で距離場を再計算する。
+    if (!best || bestD >= distOf(here)) {
+      flood();
+      ({ best, bestD } = pick());
+    }
+    if (!best || bestD === Infinity) break; // 到達不能
+    pos = { ...best };
+    path.push(pos);
+  }
+
+  // 安全網: 上限到達/行き詰まりは既知の最短経路で補完する。
+  const fallback = shortestPathBetween(pos, goal);
+  for (const key of fallback.visited || []) visited.add(key);
+  if (fallback.path) {
+    for (const next of fallback.path.slice(1)) path.push(next);
+  }
+  return { path: samePos(path[path.length - 1], goal) ? path : null, visited };
+}
+
+function solveMicromouseInstant() {
+  const gen = micromouseAnimated();
+  let step = gen.next();
+  while (!step.done) step = gen.next();
+  return step.value;
+}
+
 function appendFallbackPath(path, pathKeys, visited, current, goal) {
   const fallback = shortestPathBetween(current, goal);
   for (const key of fallback.visited) visited.add(key);
@@ -1636,6 +1876,61 @@ async function animatePaintbrush(startedAt, token) {
   return null;
 }
 
+// マイクロマウス探索のアニメーション。エージェントを1歩ずつ進めながら
+// 視界(sensed)を判明済みに加えて霧を晴らしていく。
+async function animateMicromouse(startedAt, token) {
+  const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
+  const { batchSize, sleepFactor } = animationPacing();
+  const generator = micromouseAnimated();
+  const trail = [];
+  state.finalPathMode = false;
+
+  while (state.running && token === state.runToken) {
+    let done = null;
+    let last = null;
+    for (let i = 0; i < batchSize; i += 1) {
+      const step = generator.next();
+      if (step.done) {
+        done = step.value;
+        break;
+      }
+      const event = step.value;
+      last = event;
+      state.player = event.pos;
+      trail.push(event.pos);
+      for (const key of event.sensed) {
+        state.revealed.add(key);
+        state.visited.add(key);
+      }
+    }
+
+    if (done) {
+      const result = done;
+      state.visited = result.visited;
+      for (const key of result.visited) state.revealed.add(key);
+      setPath(result.path || []);
+      if (result.path) state.player = result.path[result.path.length - 1];
+      state.currentKey = null;
+      state.finalPathMode = Boolean(result.path);
+      if (result.path) setVisibleFloor(result.path[result.path.length - 1].z, false);
+      drawMaze();
+      return result;
+    }
+
+    if (last) {
+      state.currentKey = posKey(last.pos);
+      setVisibleFloor(last.pos.z, false);
+      setPath(trail.slice()); // 走行跡
+      setMetrics(state.visited.size, trail.length, performance.now() - startedAt);
+      setStatus(`マイクロマウス: 探索中 (${floorName(state.visibleFloor)})`);
+      drawMaze();
+      await sleep(speed.step * sleepFactor);
+    }
+  }
+
+  return null;
+}
+
 // 各解法の表示名・即時実行関数・アニメーション・最短保証フラグ。
 // runSolver と比較機能（solverComparison）で共有する。
 const SOLVER_CONFIGS = {
@@ -1660,8 +1955,15 @@ const SOLVER_CONFIGS = {
   bfs: { label: "BFS", instant: solveBfsInstant, animated: bfsAnimated, optimal: true },
   dfs: { label: "DFS", instant: solveDfsInstant, animated: dfsAnimated, optimal: false },
   astar: { label: "A*", instant: solveAstarInstant, animated: astarAnimated, optimal: true },
+  micromouse: {
+    label: "マイクロマウス",
+    instant: solveMicromouseInstant,
+    animated: () => micromouseAnimated(),
+    optimal: false,
+  },
 };
 
+// 比較・バッチ・掃引で回す解法群（マイクロマウスは霧専用のため含めない）。
 const SOLVER_ORDER = ["bfs", "astar", "dfs", "paintbrush", "right", "left"];
 
 function nowMs() {
@@ -2469,6 +2771,11 @@ async function runSolver(name) {
   const config = SOLVER_CONFIGS[name];
   if (!config) return;
 
+  const isMicromouse = name === "micromouse";
+  // マイクロマウスのみ霧ON、他の解法は全体像を見せるため霧OFFにする。
+  state.player = { ...state.start };
+  setFog(isMicromouse);
+
   clearVisualization();
   setVisibleFloor(state.start.z, false);
   drawMaze();
@@ -2483,25 +2790,31 @@ async function runSolver(name) {
     if (dom.animate.checked) {
       if (name === "paintbrush") {
         result = await animatePaintbrush(startedAt, token);
+      } else if (isMicromouse) {
+        result = await animateMicromouse(startedAt, token);
       } else {
         result = await animateGeneric(config.animated(), config.label, startedAt, token);
       }
     } else {
       result = config.instant();
+      if (isMicromouse && result) {
+        // 即時実行でも探索済みセルを判明済みにして霧を晴らす。
+        for (const key of result.visited) state.revealed.add(key);
+      }
     }
 
     if (result && token === state.runToken) {
       finishSolver(config.label, result, startedAt);
-      // ヒートマップ表示が有効なら、探索順のグラデーションで塗り直す。
-      if (dom.heatmap && dom.heatmap.checked && result.path) {
+      // ヒートマップ表示が有効なら、探索順のグラデーションで塗り直す（霧中は無効）。
+      if (dom.heatmap && dom.heatmap.checked && result.path && !state.fog) {
         const visit = solverVisitOrder(name);
         state.heat = { order: visit.order, total: visit.total };
         updateHeatmapLegend();
         drawMaze();
       }
       // アニメーション有効かつ解答が階をまたぐ場合は、ルートをなぞりながら
-      // 上り/下りの階層遷移演出を再生する。
-      if (dom.animate.checked && pathCrossesFloors(result.path)) {
+      // 上り/下りの階層遷移演出を再生する（マイクロマウスは探索自体が演出なので除外）。
+      if (dom.animate.checked && !isMicromouse && pathCrossesFloors(result.path)) {
         const done = await animateSolutionTraversal(result.path, token, config.label);
         if (done && token === state.runToken) {
           setStatus(`${config.label}: 完了 (${floorName(state.visibleFloor)})`);
@@ -2534,6 +2847,7 @@ function movePlayer(dx, dy) {
   clearVisualization();
   state.player = next;
   const changedFloor = applyStairTransition();
+  if (state.fog) revealFrom(state.player);
   setVisibleFloor(state.player.z, false);
   drawMaze();
   if (samePos(state.player, state.goal)) {
@@ -2652,11 +2966,30 @@ function bindEvents() {
   updateExportButtons();
   if (dom.heatmap) {
     dom.heatmap.addEventListener("change", () => {
+      if (dom.heatmap.checked && state.fog) {
+        setFog(false); // 霧とヒートマップは併用しない
+      }
       if (!dom.heatmap.checked) {
         state.heat = null;
         drawMaze();
       }
       updateHeatmapLegend();
+    });
+  }
+  if (dom.fogToggle) {
+    dom.fogToggle.addEventListener("change", () => {
+      if (dom.fogToggle.checked && dom.heatmap && dom.heatmap.checked) {
+        // 霧とヒートマップは併用しない
+        dom.heatmap.checked = false;
+        state.heat = null;
+        updateHeatmapLegend();
+      }
+      setFog(dom.fogToggle.checked);
+      setStatus(
+        dom.fogToggle.checked
+          ? "マイクロマウス視点: 矢印/WASDで移動してゴールを探そう"
+          : "通常表示に戻りました",
+      );
     });
   }
 
@@ -2746,6 +3079,9 @@ if (typeof module !== "undefined" && module.exports) {
     solveAstarInstant,
     solvePaintbrushInstant,
     solveWallFollowerInstant,
+    solveMicromouseInstant,
+    computeVisibleCells,
+    revealFrom,
     floodFillReachable,
   };
 }
