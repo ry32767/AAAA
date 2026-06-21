@@ -322,7 +322,6 @@ function floorName(index) {
 
 // 実際に使う表示モード。1 階しかなければ常に single。
 function effectiveViewMode() {
-  if (state.fog) return "single"; // 霧モードは自分のいる階だけ見える
   if (state.floorCount <= 1) return "single";
   return state.viewMode;
 }
@@ -400,18 +399,28 @@ function setControlsRunning(isRunning) {
   dom.reset.disabled = isRunning;
   dom.size.disabled = isRunning;
   dom.floorCount.disabled = isRunning;
-  if (dom.compare) dom.compare.disabled = isRunning;
-  if (dom.batch) dom.batch.disabled = isRunning;
-  if (dom.sweep) dom.sweep.disabled = isRunning;
   if (dom.randomSeed) dom.randomSeed.disabled = isRunning;
 
-  document.querySelectorAll("[data-solver]").forEach((button) => {
-    button.disabled = isRunning;
-  });
   document.querySelectorAll("[data-move]").forEach((button) => {
     button.disabled = isRunning;
   });
+  updateSolverButtons();
   updateFloorUi();
+}
+
+// 解法・解析ボタンの活性状態を更新する。
+// 実行中は全て無効。霧（マイクロマウス視点）モード中はマイクロマウス以外の
+// 解法と、他解法を回す解析機能（比較・バッチ・掃引）を選択不可にする。
+function updateSolverButtons() {
+  const running = state.running;
+  document.querySelectorAll("[data-solver]").forEach((button) => {
+    const isMicromouse = button.dataset.solver === "micromouse";
+    button.disabled = running || (state.fog && !isMicromouse);
+  });
+  const analysisDisabled = running || state.fog;
+  if (dom.compare) dom.compare.disabled = analysisDisabled;
+  if (dom.batch) dom.batch.disabled = analysisDisabled;
+  if (dom.sweep) dom.sweep.disabled = analysisDisabled;
 }
 
 function isOpen(x, y, z) {
@@ -504,6 +513,7 @@ function setFog(on) {
     revealFrom(state.player);
     setVisibleFloor(state.player.z, false);
   }
+  updateSolverButtons();
   updateFloorUi();
   drawMaze();
 }
@@ -918,13 +928,14 @@ function drawFloorBlock(floor, ox, oy, layout) {
 
   // 階ラベル + 枠
   if (layout.showAll) {
-    ctx.fillStyle = floor === state.start.z || floor === state.goal.z ? "#0f172a" : "#475569";
+    const goalKnown = !state.fog || state.revealed.has(posKey(state.goal));
+    ctx.fillStyle = floor === state.start.z || (floor === state.goal.z && goalKnown) ? "#0f172a" : "#475569";
     ctx.font = "bold 12px system-ui, sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
     const tags = [];
     if (floor === state.start.z) tags.push("S");
-    if (floor === state.goal.z) tags.push("G");
+    if (floor === state.goal.z && goalKnown) tags.push("G");
     const suffix = tags.length ? `  [${tags.join("/")}]` : "";
     ctx.fillText(`${floorName(floor)}${suffix}`, ox + 2, oy - 5);
   }
@@ -1076,6 +1087,7 @@ function drawMaze3D() {
   for (const keyStr of state.stairsByKey.keys()) {
     const pos = posFromKey(keyStr);
     if (pos.z >= floorCount - 1) continue;
+    if (state.fog && !state.revealed.has(keyStr)) continue; // 未発見の階段の柱は隠す
     const a = isoProject(pos.x + 0.5, pos.y + 0.5, pos.z, originX, originY);
     const b = isoProject(pos.x + 0.5, pos.y + 0.5, pos.z + 1, originX, originY);
     ctx.beginPath();
@@ -1124,6 +1136,8 @@ function drawFloorIso(floor, originX, originY) {
         if (key === state.candidateKey) color = COLORS.candidate;
         if (key === state.currentKey) color = COLORS.player;
       }
+      // 霧モード: 未判明のセルは黒で塗りつぶす（通路の下地も隠す）
+      if (state.fog && !state.revealed.has(key)) color = COLORS.fog;
       if (color) {
         ctx.fillStyle = color;
         ctx.fillRect(x * cs, y * cs, cs, cs);
@@ -1141,7 +1155,7 @@ function drawFloorIso(floor, originX, originY) {
       ctx.beginPath();
       let pen = false;
       for (const p of state.path) {
-        if (p.z !== floor) {
+        if (p.z !== floor || (state.fog && !state.revealed.has(posKey(p)))) {
           pen = false;
           continue;
         }
@@ -1164,9 +1178,10 @@ function drawFloorIso(floor, originX, originY) {
   ctx.font = "bold 12px system-ui, sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
+  const goalVisible = !state.fog || state.revealed.has(posKey(state.goal));
   const tags = [];
   if (floor === state.start.z) tags.push("S");
-  if (floor === state.goal.z) tags.push("G");
+  if (floor === state.goal.z && goalVisible) tags.push("G");
   const labelPt = isoProject(0, 0, floor, originX, originY);
   ctx.fillText(`${floorName(floor)}${tags.length ? `  [${tags.join("/")}]` : ""}`, labelPt.sx, labelPt.sy - 4);
 
@@ -1174,6 +1189,7 @@ function drawFloorIso(floor, originX, originY) {
   for (const keyStr of state.stairsByKey.keys()) {
     const pos = posFromKey(keyStr);
     if (pos.z !== floor) continue;
+    if (state.fog && !state.revealed.has(keyStr)) continue; // 未発見の階段は隠す
     const role = stairRoleAt(pos);
     const glyph = role === "up" ? "▲" : role === "down" ? "▼" : "↕";
     const c = isoProject(pos.x + 0.5, pos.y + 0.5, floor, originX, originY);
@@ -1185,7 +1201,7 @@ function drawFloorIso(floor, originX, originY) {
     const c = isoProject(state.start.x + 0.5, state.start.y + 0.5, floor, originX, originY);
     drawMarker(c.sx, c.sy, markerR, COLORS.start, "#064e3b", "S");
   }
-  if (state.goal.z === floor) {
+  if (state.goal.z === floor && goalVisible) {
     const c = isoProject(state.goal.x + 0.5, state.goal.y + 0.5, floor, originX, originY);
     drawMarker(c.sx, c.sy, markerR, COLORS.goal, "#7f1d1d", "G");
   }
