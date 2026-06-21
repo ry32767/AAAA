@@ -30,6 +30,38 @@ const SPEEDS = {
   fast: { flood: 0, step: 12 },
 };
 
+// SPEEDS の値は「基準サイズの迷路」を対象に調律されている。迷路が大きいほど
+// 探索ステップ数が増えるため、同じ速度設定でも単純に適用すると総再生時間が
+// サイズに比例して延びてしまう。そこで基準サイズに対するセル数比を使い、
+// 迷路サイズによらず総再生時間がほぼ一定になるようにペース配分する。
+// 選択可能な最小の迷路(81x61x1)を基準にする。これより小さい迷路は存在しないため
+// すべての迷路で基準比 >= 1 となり、バッチ化（描画回数の削減）が全サイズで効く。
+// 最小の迷路を「最も遅い基準」とし、大きい迷路ほど総再生時間が基準に揃うよう速める。
+const ANIMATION_REFERENCE_CELLS = 81 * 61 * 1;
+
+// 現在の迷路セル数の基準比。基準より大きい迷路では 1 を超える。
+function animationSizeRatio(
+  width = state.width,
+  height = state.height,
+  floorCount = state.floorCount,
+) {
+  const cells = width * height * floorCount;
+  if (!cells) return 1;
+  return cells / ANIMATION_REFERENCE_CELLS;
+}
+
+// 迷路サイズに応じたアニメーションのペース配分を求める。
+// - batchSize: 1 回の描画で進めるアルゴリズムのステップ数（大きい迷路ほど増える）
+// - sleepFactor: 1 回の描画あたりの待機時間に掛ける倍率（小さい迷路ほど増える）
+// 描画回数 ≒ ステップ数 / batchSize、総待機時間 ≒ 描画回数 × 基準待機 となり、
+// ステップ数が概ねセル数に比例することから、総再生時間が一定に近づく。
+function animationPacing(ratio = animationSizeRatio()) {
+  const safeRatio = ratio > 0 ? ratio : 1;
+  const batchSize = Math.max(1, Math.round(safeRatio));
+  const sleepFactor = batchSize / safeRatio;
+  return { batchSize, sleepFactor };
+}
+
 const TAU = Math.PI * 2;
 const FLOOR_GAP = 18; // 全階表示時の階ブロック間の余白(px)
 const FLOOR_LABEL_H = 18; // 全階表示時の階ラベル領域の高さ(px)
@@ -752,6 +784,22 @@ function floorLayout() {
   return { showAll, floors, labelH, blockW, blockH, stepY, canvasWidth, canvasHeight };
 }
 
+// 正解ルートの線を、与えられた stroke(color, width) で重ね描きする。
+// 通常は「濃い縁取り + 本来色」の 2 層。ヒートマップ表示中は虹色の背景に
+// 埋もれて見えづらいため、濃い縁取り + 白の下地 + 本来色 の 3 層にして
+// コントラストを上げ、最短経路をはっきり視認できるようにする。
+function drawPathStrokes(stroke, cs) {
+  const core = state.finalPathMode ? COLORS.solution : COLORS.confirmed;
+  if (state.heat) {
+    stroke("rgba(2, 6, 23, 0.95)", Math.max(4, cs * 1.6));
+    stroke("#ffffff", Math.max(3, cs * 1.05));
+    stroke(core, Math.max(2, cs * 0.6));
+  } else {
+    stroke("rgba(15, 23, 42, 0.55)", Math.max(3, cs * 1.15));
+    stroke(core, Math.max(2, cs * 0.7));
+  }
+}
+
 // 大きく目立つ円形マーカー（スタート/ゴール/プレイヤー/階段）。セルが小さくても視認できる。
 function drawMarker(cx, cy, radius, fill, ring, label) {
   ctx.beginPath();
@@ -856,8 +904,7 @@ function drawFloorBlock(floor, ox, oy, layout) {
       }
       ctx.stroke();
     };
-    stroke("rgba(15, 23, 42, 0.55)", Math.max(3, cs * 1.15));
-    stroke(state.finalPathMode ? COLORS.solution : COLORS.confirmed, Math.max(2, cs * 0.7));
+    drawPathStrokes(stroke, cs);
   }
 
   // 階段マーカー（上り▲/下り▼/両方↕）
@@ -1008,8 +1055,7 @@ function drawFloorIso(floor, originX, originY) {
       }
       ctx.stroke();
     };
-    stroke("rgba(15, 23, 42, 0.5)", Math.max(3, cs * 1.1));
-    stroke(state.finalPathMode ? COLORS.solution : COLORS.confirmed, Math.max(2, cs * 0.7));
+    drawPathStrokes(stroke, cs);
   }
 
   ctx.restore();
@@ -1465,11 +1511,24 @@ function sleep(ms) {
 
 async function animateGeneric(generator, label, startedAt, token) {
   const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
+  const { batchSize, sleepFactor } = animationPacing();
 
   while (state.running && token === state.runToken) {
-    const step = generator.next();
-    if (step.done) {
-      const result = step.value;
+    // 大きい迷路では 1 描画あたり複数ステップ進めて描画回数を抑える。
+    let done = null;
+    for (let i = 0; i < batchSize; i += 1) {
+      const step = generator.next();
+      if (step.done) {
+        done = step.value;
+        break;
+      }
+      const last = step.value[step.value.length - 1];
+      if (last) setVisibleFloor(last.z, false);
+      for (const pos of step.value) state.visited.add(posKey(pos));
+    }
+
+    if (done) {
+      const result = done;
       state.visited = result.visited;
       setPath(result.path || []);
       state.rejected = result.rejected || new Set();
@@ -1482,13 +1541,10 @@ async function animateGeneric(generator, label, startedAt, token) {
       return result;
     }
 
-    const last = step.value[step.value.length - 1];
-    if (last) setVisibleFloor(last.z, false);
-    for (const pos of step.value) state.visited.add(posKey(pos));
     setMetrics(state.visited.size, state.path.length, performance.now() - startedAt);
     setStatus(`${label}: 探索中 (${floorName(state.visibleFloor)})`);
     drawMaze();
-    await sleep(speed.flood);
+    await sleep(speed.flood * sleepFactor);
   }
 
   return null;
@@ -1497,11 +1553,46 @@ async function animateGeneric(generator, label, startedAt, token) {
 async function animatePaintbrush(startedAt, token) {
   const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
   const generator = paintbrushAnimated();
+  const { batchSize, sleepFactor } = animationPacing();
 
   while (state.running && token === state.runToken) {
-    const step = generator.next();
-    if (step.done) {
-      const result = step.value;
+    // 大きい迷路では複数イベントをまとめて適用し、描画回数を抑える。
+    let done = null;
+    let lastType = null;
+    for (let i = 0; i < batchSize; i += 1) {
+      const step = generator.next();
+      if (step.done) {
+        done = step.value;
+        break;
+      }
+
+      const event = step.value;
+      lastType = event.type;
+      if (event.type === "step") {
+        setVisibleFloor(event.current.z, false);
+        state.currentKey = posKey(event.current);
+        state.candidateKey = null;
+        state.tempBlock = null;
+        setPath(event.path);
+      }
+
+      if (event.type === "test") {
+        setVisibleFloor(event.tempBlock[0].z, false);
+        state.candidateKey = posKey(event.candidate);
+        state.tempBlock = event.tempBlock;
+      }
+
+      if (event.type === "flood") {
+        for (const key of event.cells) state.visited.add(key);
+      }
+
+      if (event.type === "reject") {
+        state.rejected.add(posKey(event.branch));
+      }
+    }
+
+    if (done) {
+      const result = done;
       state.visited = result.visited;
       state.rejected = result.rejected;
       setPath(result.path || []);
@@ -1514,33 +1605,10 @@ async function animatePaintbrush(startedAt, token) {
       return result;
     }
 
-    const event = step.value;
-    if (event.type === "step") {
-      setVisibleFloor(event.current.z, false);
-      state.currentKey = posKey(event.current);
-      state.candidateKey = null;
-      state.tempBlock = null;
-      setPath(event.path);
-    }
-
-    if (event.type === "test") {
-      setVisibleFloor(event.tempBlock[0].z, false);
-      state.candidateKey = posKey(event.candidate);
-      state.tempBlock = event.tempBlock;
-    }
-
-    if (event.type === "flood") {
-      for (const key of event.cells) state.visited.add(key);
-    }
-
-    if (event.type === "reject") {
-      state.rejected.add(posKey(event.branch));
-    }
-
     setMetrics(state.visited.size, state.path.length, performance.now() - startedAt);
-    setStatus(`Paintbrush: ${event.type} (${floorName(state.visibleFloor)})`);
+    setStatus(`Paintbrush: ${lastType} (${floorName(state.visibleFloor)})`);
     drawMaze();
-    await sleep(event.type === "flood" ? speed.flood : speed.step);
+    await sleep((lastType === "flood" ? speed.flood : speed.step) * sleepFactor);
   }
 
   return null;
@@ -1760,6 +1828,43 @@ function solverVisitOrder(name) {
   }
 }
 
+// アニメーションの再生に要する時間を見積もる（DOM 非依存・検証用）。
+// animateGeneric / animatePaintbrush と同じバッチ・待機ルールでジェネレータを
+// 走査し、累積待機時間(totalSleep)と描画回数(draws)を返す。
+// applyPacing=false で従来挙動（迷路サイズに依らず等倍）を再現でき、
+// ペース配分の効果を比較検証できる。
+function estimateAnimationDuration(name, speedName = "normal", applyPacing = true) {
+  const speed = SPEEDS[speedName] || SPEEDS.normal;
+  const { batchSize, sleepFactor } = applyPacing
+    ? animationPacing()
+    : { batchSize: 1, sleepFactor: 1 };
+  const isPaintbrush = name === "paintbrush";
+  const gen = SOLVER_CONFIGS[name].animated();
+
+  let totalSleep = 0;
+  let draws = 0;
+  let pending = 0;
+  let lastType = null;
+
+  const flush = () => {
+    draws += 1;
+    const base = isPaintbrush && lastType !== "flood" ? speed.step : speed.flood;
+    totalSleep += base * sleepFactor;
+    pending = 0;
+  };
+
+  while (true) {
+    const step = gen.next();
+    // done はそのバッチを描画せず終了する（アニメーターの挙動に合わせる）。
+    if (step.done) break;
+    pending += 1;
+    if (isPaintbrush) lastType = step.value.type;
+    if (pending >= batchSize) flush();
+  }
+
+  return { totalSleep, draws };
+}
+
 // 探索順 t(0..1) を寒色→暖色のグラデーションに変換する。
 function heatColor(t) {
   const hue = 210 - clamp(t, 0, 1) * 210; // 青(210) → 赤(0)
@@ -1791,6 +1896,145 @@ function finishSolver(label, result, startedAt) {
   } else {
     announce(`${label}: 経路が見つかりませんでした。`);
   }
+}
+
+// 階をまたぐ瞬間の演出オーバーレイ。t は 0→1 の進捗。
+// 上り(up=true)は青系・▲・上方向スライド、下りは紫系・▼・下方向スライドで区別する。
+function drawFloorTransitionOverlay(t, up, tint, glyph, label) {
+  const W = dom.canvas.width;
+  const H = dom.canvas.height;
+  const fade = Math.sin(clamp(t, 0, 1) * Math.PI); // フェードイン→アウト(0→1→0)
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // 画面全体を進行方向の色で薄く染める
+  ctx.globalAlpha = 0.18 * fade;
+  ctx.fillStyle = tint;
+  ctx.fillRect(0, 0, W, H);
+
+  // 中央の方向バッジ
+  const cx = W / 2;
+  const cy = H / 2;
+  const r = Math.max(36, Math.min(W, H) * 0.16);
+
+  ctx.globalAlpha = 0.9 * fade;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, TAU);
+  ctx.fillStyle = tint;
+  ctx.fill();
+  ctx.lineWidth = Math.max(3, r * 0.1);
+  ctx.strokeStyle = "#ffffff";
+  ctx.stroke();
+
+  // 進行方向へ流れる矢印（3 連シェブロン）
+  const dir = up ? -1 : 1;
+  const slide = (t % 1) * r * 0.7 * dir;
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `bold ${Math.round(r * 0.7)}px system-ui, sans-serif`;
+  for (const off of [-1, 0, 1]) {
+    ctx.globalAlpha = (0.95 - Math.abs(off) * 0.35) * fade;
+    ctx.fillText(glyph, cx, cy + off * r * 0.6 + slide);
+  }
+
+  // ラベル（上り/下り）
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `bold ${Math.round(r * 0.34)}px system-ui, sans-serif`;
+  ctx.fillText(label, cx, cy + r * 1.45);
+
+  ctx.restore();
+}
+
+// 1 回分の階層遷移演出を再生する。targetFloor を表示に切り替えてから
+// オーバーレイをアニメーションする。停止/再実行されたら false を返す。
+async function playFloorTransition(direction, token, targetFloor) {
+  if (targetFloor != null) setVisibleFloor(targetFloor, false);
+  const up = direction === "up";
+  const tint = up ? COLORS.stairUp : COLORS.stairDown;
+  const glyph = up ? "▲" : "▼";
+  const label = up ? "上り" : "下り";
+  // サイズ相対のテンポに合わせ、待機倍率で演出時間も調整する。
+  const { sleepFactor } = animationPacing();
+  const duration = clamp(360 * sleepFactor, 220, 700);
+  const start = performance.now();
+
+  while (state.running && token === state.runToken) {
+    const t = (performance.now() - start) / duration;
+    if (t >= 1) break;
+    drawMaze();
+    drawFloorTransitionOverlay(t, up, tint, glyph, label);
+    await sleep(16);
+  }
+
+  if (!state.running || token !== state.runToken) return false;
+  drawMaze();
+  return true;
+}
+
+// 解答ルートが階層をまたぐか（階段を通るか）を判定する。
+function pathCrossesFloors(path) {
+  if (!path) return false;
+  for (let i = 1; i < path.length; i += 1) {
+    if (path[i].z !== path[i - 1].z) return true;
+  }
+  return false;
+}
+
+// 解答ルートを始点から終点までなぞり、階段で上り/下りの遷移演出を入れる。
+// 探索が終わった「正解の道のり」を再生する位置づけ。サイズによらず再生時間が
+// 一定になるよう、なぞるテンポをパスの長さに応じて間引く。
+async function animateSolutionTraversal(path, token, label) {
+  if (!path || path.length < 2) return true;
+
+  const speed = SPEEDS[dom.speed.value] || SPEEDS.normal;
+  // パス長によらず描画回数を概ね一定(~TARGET)に保つ。
+  const TARGET = 120;
+  const batchSize = Math.max(1, Math.ceil((path.length - 1) / TARGET));
+  const stepMs = speed.step * 0.4;
+
+  state.finalPathMode = true;
+  state.player = { ...path[0] };
+  setVisibleFloor(state.player.z, false);
+  drawMaze();
+
+  let pending = 0;
+  for (let i = 1; i < path.length; i += 1) {
+    if (!state.running || token !== state.runToken) return false;
+    const cell = path[i];
+
+    if (cell.z !== state.player.z) {
+      // 直前のセルまで描いてから遷移演出に入る。
+      state.player = { ...path[i - 1] };
+      state.currentKey = posKey(state.player);
+      const direction = cell.z > state.player.z ? "up" : "down";
+      setStatus(`${label}: ${direction === "up" ? "上り階段" : "下り階段"}を通過`);
+      const ok = await playFloorTransition(direction, token, cell.z);
+      if (!ok) return false;
+      pending = 0;
+    }
+
+    state.player = { ...cell };
+    pending += 1;
+
+    if (pending >= batchSize || i === path.length - 1) {
+      state.currentKey = posKey(state.player);
+      setVisibleFloor(state.player.z, false);
+      drawMaze();
+      setStatus(`${label}: ルート再生 (${floorName(state.visibleFloor)})`);
+      await sleep(stepMs);
+      pending = 0;
+    }
+  }
+
+  // 操作用プレイヤーは始点へ戻し、表示は終点の階に合わせて締める。
+  state.player = { ...path[0] };
+  state.currentKey = null;
+  setVisibleFloor(path[path.length - 1].z, false);
+  drawMaze();
+  return true;
 }
 
 function clearComparison() {
@@ -2170,6 +2414,14 @@ async function runSolver(name) {
         state.heat = { order: visit.order, total: visit.total };
         drawMaze();
       }
+      // アニメーション有効かつ解答が階をまたぐ場合は、ルートをなぞりながら
+      // 上り/下りの階層遷移演出を再生する。
+      if (dom.animate.checked && pathCrossesFloors(result.path)) {
+        const done = await animateSolutionTraversal(result.path, token, config.label);
+        if (done && token === state.runToken) {
+          setStatus(`${config.label}: 完了 (${floorName(state.visibleFloor)})`);
+        }
+      }
     } else if (token === state.runToken) {
       setStatus(`${config.label}: 停止`);
     }
@@ -2382,6 +2634,10 @@ if (typeof module !== "undefined" && module.exports) {
     batchToCsv,
     sweepToCsv,
     solverVisitOrder,
+    pathCrossesFloors,
+    animationSizeRatio,
+    animationPacing,
+    estimateAnimationDuration,
     isOpen,
     getNeighbors,
     heuristic,
